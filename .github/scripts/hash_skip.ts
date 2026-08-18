@@ -79,7 +79,7 @@ function extraDigests(definition: Declaration): Readonly<Record<string, Digest>>
 }
 
 function resolveKey(root: string, key: string, ref: string, mode = "normal"): Readonly<{ cacheKey: string; hash: Digest; marker: string }> {
-  ensure.that(["normal", "quarantine", "verify"].includes(mode), "hash_skip mode must be normal, quarantine, or verify");
+  ensure.that(["complete", "normal", "quarantine", "verify"].includes(mode), "hash_skip mode must be complete, normal, quarantine, or verify");
   const commit = git(["rev-parse", "--verify", `${ref}^{commit}`], root).toString("utf8").trim();
   const definition = declaration(root, key, commit);
   const source = gitPathSetDigest(root, commit, definition.hashPaths, { domain: "open-design/hash-skip/source/v1", label: key });
@@ -116,6 +116,8 @@ function selfCheck(): void {
     process.env.HASH_SKIP_EXTRA_RUNTIME = digest("node24");
     const first = resolveKey(root, "probe", "HEAD");
     ensure.that(first.hash === resolveKey(root, "probe", "HEAD").hash, "same inputs produced different hashes");
+    const completed = resolveKey(root, "probe", "HEAD", "complete");
+    ensure.that(first.hash === completed.hash && first.cacheKey === completed.cacheKey && first.marker === completed.marker, "normal and complete modes produced asymmetric identities");
     writeFileSync(join(root, "source.txt"), "two\n"); execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["commit", "-qm", "two"], { cwd: root });
     const sourceChanged = resolveKey(root, "probe", "HEAD");
     ensure.that(first.hash !== sourceChanged.hash, "source change did not invalidate hash");

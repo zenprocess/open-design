@@ -6,7 +6,7 @@ inputs:
     description: Declaration key under .github/hash_skip
     required: true
   mode:
-    description: normal, verify, or quarantine
+    description: normal, verify, quarantine, or complete
     required: false
     default: normal
 
@@ -14,11 +14,11 @@ outputs:
   hash:
     value: ${{ steps.resolve.outputs.hash }}
   reason:
-    value: ${{ inputs.mode == 'quarantine' && 'quarantine' || inputs.mode == 'verify' && 'verify' || steps.cache.outputs.cache-hit == 'true' && 'hit' || 'miss' }}
+    value: ${{ inputs.mode == 'complete' && 'complete' || inputs.mode == 'quarantine' && 'quarantine' || inputs.mode == 'verify' && 'verify' || steps.restore.outputs.cache-hit == 'true' && 'hit' || 'miss' }}
   run:
-    value: ${{ inputs.mode != 'normal' || steps.cache.outputs.cache-hit != 'true' }}
+    value: ${{ inputs.mode != 'complete' && (inputs.mode != 'normal' || steps.restore.outputs.cache-hit != 'true') }}
   skip:
-    value: ${{ inputs.mode == 'normal' && steps.cache.outputs.cache-hit == 'true' }}
+    value: ${{ inputs.mode == 'normal' && steps.restore.outputs.cache-hit == 'true' }}
 
 runs:
   using: composite
@@ -28,11 +28,15 @@ runs:
       shell: bash
       run: node --experimental-strip-types .github/scripts/hash_skip.ts "${{ inputs.hash_skip }}" --mode "${{ inputs.mode }}"
     - name: Resolve successful execution cache
-      id: cache
-      if: ${{ inputs.mode != 'quarantine' }}
-      # The combined cache action restores here and registers the marker from
-      # its post step only when the surrounding job completes successfully.
-      uses: actions/cache@v5.0.5
+      id: restore
+      if: ${{ inputs.mode != 'quarantine' && inputs.mode != 'complete' }}
+      uses: actions/cache/restore@v5.0.5
+      with:
+        key: ${{ steps.resolve.outputs.cache_key }}
+        path: ${{ steps.resolve.outputs.marker }}
+    - name: Register successful execution cache
+      if: ${{ inputs.mode == 'complete' }}
+      uses: actions/cache/save@v5.0.5
       with:
         key: ${{ steps.resolve.outputs.cache_key }}
         path: ${{ steps.resolve.outputs.marker }}

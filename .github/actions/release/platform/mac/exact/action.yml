@@ -505,6 +505,15 @@ runs:
       shell: bash
       if: ${{ always() && (inputs.phase != 'prepare' || failure()) }}
       run: cat "${{ runner.temp }}/release-report/${{ inputs.target }}/summary.md" >> "$GITHUB_STEP_SUMMARY"
+    - name: Register successful ${{ inputs.target }} smoke hash
+      if: ${{ inputs.phase != 'prepare' && inputs.smoke-mode != 'skip' && env.OD_RELEASE_EXACT_SMOKE_PROOF == 'miss' && success() }}
+      uses: ./.github/actions/hash-skip
+      env:
+        HASH_SKIP_EXTRA_CLOSURE: ${{ inputs.closure-identity-digest }}
+        HASH_SKIP_EXTRA_SHELL: ${{ inputs.shell-identity-digest }}
+      with:
+        hash_skip: release.smoke.mac
+        mode: complete
     - name: Persist ${{ inputs.target }} tools-pack cache
       if: ${{ inputs.phase != 'prepare' && success() }}
       uses: ./.github/actions/release/platform/cache/save
