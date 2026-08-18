@@ -7,6 +7,10 @@ inputs:
   identity-digest:
     description: Canonical content identity digest for the shared Closure build
     required: true
+  handoff-enabled:
+    description: Upload the cross-runner contribution artifact
+    required: false
+    default: "true"
   min-shell-version:
     description: Frozen initial Shell compatibility declaration for this channel
     required: true
@@ -37,7 +41,7 @@ runs:
         RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.identity-digest }}
         RELEASE_CLOSURE_BUILD_KIND: shared
         RELEASE_CLOSURE_BUILD_TOKEN: shared
-        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-build/closure-shared/shared-contribution.json
+        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-closure/shared/shared-contribution.json
         RELEASE_CLOSURE_MATERIALIZE: "false"
         RELEASE_VERSION: ${{ inputs.release-version }}
       run: pnpm exec tools-release resolve-closure-build
@@ -58,7 +62,8 @@ runs:
           --json > "$build_dir/build.json"
         contribution_path="$(jq -er '.contributionPath' "$build_dir/build.json")"
         blob_root="$(jq -er '.blobRoot' "$build_dir/build.json")"
-        cp "$contribution_path" "$build_dir/shared-contribution.json"
+        mkdir -p "$RUNNER_TEMP/release-closure/shared"
+        cp "$contribution_path" "$RUNNER_TEMP/release-closure/shared/shared-contribution.json"
         cp -R "$blob_root" "$build_dir/blobs"
 
     - name: Register immutable shared Closure build
@@ -70,7 +75,7 @@ runs:
         RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.identity-digest }}
         RELEASE_CLOSURE_BUILD_KIND: shared
         RELEASE_CLOSURE_BUILD_TOKEN: shared
-        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-build/closure-shared/shared-contribution.json
+        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-closure/shared/shared-contribution.json
       run: pnpm exec tools-release register-closure-build
 
     - name: Publish verified shared Closure blobs
@@ -79,7 +84,7 @@ runs:
       env:
         RELEASE_CHANNEL: ${{ inputs.channel }}
         RELEASE_CLOSURE_BLOB_ROOT: ${{ runner.temp }}/release-build/closure-shared/blobs
-        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-build/closure-shared/shared-contribution.json
+        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-closure/shared/shared-contribution.json
         RELEASE_CLOSURE_CONTRIBUTION_KIND: shared
         RELEASE_CLOSURE_PUBLICATION_JSON_PATH: ${{ runner.temp }}/release-build/closure-shared/publication.json
         RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.identity-digest }}
@@ -90,10 +95,11 @@ runs:
       run: pnpm exec tools-release publish-closure-contribution
 
     - name: Upload shared Closure contract and acceptance blobs
+      if: ${{ inputs.handoff-enabled == 'true' }}
       uses: actions/upload-artifact@v7
       with:
         name: open-design-${{ inputs.channel }}-closure-shared
         path: |
-          ${{ runner.temp }}/release-build/closure-shared/shared-contribution.json
+          ${{ runner.temp }}/release-closure/shared/shared-contribution.json
         if-no-files-found: error
         retention-days: 1

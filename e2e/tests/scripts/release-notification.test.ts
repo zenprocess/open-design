@@ -10,6 +10,7 @@ import {
 
 function input(overrides: Partial<ReleaseNotificationInput> = {}): ReleaseNotificationInput {
   return {
+    activationCompletedAt: "2026-08-17T03:47:30Z",
     actor: "alice",
     branch: "feat/standalone-closure",
     channel: "beta",
@@ -138,10 +139,13 @@ describe("release Feishu notification", () => {
         coldStarts: [],
         execution: expect.objectContaining({
           durationMs: expect.any(Number),
+          observedAtMs: expect.any(Number),
           pullRequest: {
             number: 6956,
             url: "https://github.com/nexu-io/open-design/pull/6956",
           },
+          queueDurationMs: 0,
+          runStartedAtMs: expect.any(Number),
         }),
         failures: [],
         warnings: [],
@@ -150,14 +154,14 @@ describe("release Feishu notification", () => {
       expect(serialized).toContain("[0123456](https://github.com/nexu-io/open-design/commit/");
       expect(serialized).not.toContain("`0123456`");
       expect(serialized).not.toContain("渠道");
-      expect(serialized).toContain("触发者");
+      expect(serialized).toContain("触发");
       expect(serialized).toContain("[@alice](https://github.com/alice)");
       expect(serialized).toContain("手动");
       expect(serialized).toContain("publish=true · 晋升 latest");
       expect(serialized).toContain("release-beta #123");
-      expect(serialized).toContain("关联 PR");
-      expect(serialized).toContain("[#6956](https://github.com/nexu-io/open-design/pull/6956)");
-      expect(serialized).toContain("耗时");
+      expect(serialized).toContain("[PR #6956](https://github.com/nexu-io/open-design/pull/6956)");
+      expect(serialized).toContain("发布");
+      expect(serialized).toContain("通知");
       expect(serialized).not.toContain("Closure 冷启动");
       expect(serialized).not.toContain("hidden oldest change");
       expect(serialized).toContain("Mac Arm");

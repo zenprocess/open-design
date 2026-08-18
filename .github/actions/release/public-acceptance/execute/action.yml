@@ -1,0 +1,88 @@
+name: Execute public content acceptance
+description: Re-download, install, smoke, and attest one immutable public target
+
+inputs:
+  artifact-dir:
+    required: true
+  channel:
+    required: true
+  commit:
+    required: true
+  metadata-url:
+    required: true
+  mutable-metadata-url:
+    required: true
+  namespace:
+    required: true
+  os:
+    required: true
+  public-origin:
+    required: true
+  release-version:
+    required: true
+  target:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v5
+      with:
+        version: 10.33.2
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24.18.0
+        cache: pnpm
+        cache-dependency-path: pnpm-lock.yaml
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Re-download immutable public ${{ inputs.target }} artifacts
+      shell: bash
+      env:
+        RELEASE_COMMIT: ${{ inputs.commit }}
+        RELEASE_METADATA_URL: ${{ inputs.metadata-url }}
+        RELEASE_PUBLIC_ACCEPTANCE_BUILD_JSON_PATH: ${{ runner.temp }}/public-feedback/build.json
+        RELEASE_PUBLIC_ACCEPTANCE_DOWNLOAD_DIR: ${{ runner.temp }}/public-feedback/tools-pack/out/${{ inputs.os }}/namespaces/${{ inputs.namespace }}/${{ inputs.artifact-dir }}
+        RELEASE_PUBLIC_ACCEPTANCE_PLAN_PATH: ${{ runner.temp }}/public-feedback/plan.json
+        RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+        RELEASE_TARGET: ${{ inputs.target }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+      run: pnpm exec tools-release prepare-public-acceptance
+
+    - name: Smoke immutable public ${{ inputs.target }} install and online Closure cold start
+      shell: bash
+      working-directory: e2e
+      env:
+        OD_PACKAGED_E2E_BUILD_JSON_PATH: ${{ runner.temp }}/public-feedback/build.json
+        OD_PACKAGED_E2E_MAC: ${{ inputs.os == 'mac' && '1' || '' }}
+        OD_PACKAGED_E2E_MAC_SMOKE_LANES: shell
+        OD_PACKAGED_E2E_MAC_SMOKE_PROFILE: core
+        OD_PACKAGED_E2E_NAMESPACE: ${{ inputs.namespace }}
+        OD_PACKAGED_E2E_RELEASE_CHANNEL: ${{ inputs.channel }}
+        OD_PACKAGED_E2E_RELEASE_VERSION: ${{ inputs.release-version }}
+        OD_PACKAGED_E2E_REPORT_DIR: ${{ runner.temp }}/public-feedback/report
+        OD_PACKAGED_E2E_SHELL_SMOKE_PROOF: public-immutable-artifacts
+        OD_PACKAGED_E2E_TOOLS_PACK_DIR: ${{ runner.temp }}/public-feedback/tools-pack
+        # Exercise the final reusable-Shell contract: an empty Store discovers
+        # mutable latest, then Standalone resolves its exact immutable sibling.
+        OD_STANDALONE_METADATA_URL: ${{ inputs.mutable-metadata-url }}
+        OD_PACKAGED_E2E_WIN: ${{ inputs.os == 'win' && '1' || '' }}
+        OD_PACKAGED_E2E_WIN_SMOKE_LANES: shell
+        OD_PACKAGED_E2E_WIN_SMOKE_PROFILE: core
+        OD_TOOLS_PACK_EMBEDDED_CONFIG_ONLY: "1"
+      run: pnpm exec tsx scripts/release-smoke.ts ${{ inputs.os }} specs/${{ inputs.os }}.spec.ts
+
+    - name: Issue public ${{ inputs.target }} acceptance credential
+      shell: bash
+      env:
+        RELEASE_PUBLIC_ACCEPTANCE_CREDENTIAL_PATH: ${{ runner.temp }}/public-feedback/${{ inputs.target }}.json
+        RELEASE_PUBLIC_ACCEPTANCE_PLAN_PATH: ${{ runner.temp }}/public-feedback/plan.json
+        RELEASE_PUBLIC_ACCEPTANCE_SMOKE_SUMMARY_PATH: ${{ runner.temp }}/public-feedback/report/summary.json
+        RELEASE_PUBLIC_ACCEPTANCE_SUITE_RESULT_PATH: ${{ runner.temp }}/public-feedback/report/suite-result.json
+      run: pnpm exec tools-release issue-public-acceptance

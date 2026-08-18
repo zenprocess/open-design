@@ -4,6 +4,10 @@ description: Project immutable Shell and Closure registry content into one exact
 inputs:
   artifact-id:
     required: true
+  handoff-enabled:
+    description: Upload cross-runner projection artifacts
+    required: false
+    default: "true"
   channel:
     required: true
   closure-identity-digest:
@@ -35,7 +39,7 @@ runs:
         RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.closure-identity-digest }}
         RELEASE_CLOSURE_BUILD_KIND: target
         RELEASE_CLOSURE_BUILD_TOKEN: target-${{ inputs.platform }}
-        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/target-contribution.json
+        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-closure/targets/${{ inputs.platform }}/target-contribution.json
         RELEASE_CLOSURE_MATERIALIZE: "false"
         RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
         RELEASE_VERSION: ${{ inputs.release-version }}
@@ -75,7 +79,7 @@ runs:
         RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.closure-identity-digest }}
         RELEASE_CLOSURE_BUILD_KIND: target
         RELEASE_CLOSURE_BUILD_TOKEN: target-${{ inputs.platform }}
-        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/target-contribution.json
+        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-closure/targets/${{ inputs.platform }}/target-contribution.json
         RELEASE_CLOSURE_CONTRIBUTION_KIND: target
         RELEASE_CLOSURE_PUBLICATION_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/closure-publication.json
         RELEASE_CLOSURE_REMOTE_PROJECTION: "true"
@@ -126,6 +130,7 @@ runs:
           }));
 
     - name: Upload ${{ inputs.target }} publish manifest
+      if: ${{ inputs.handoff-enabled == 'true' }}
       uses: actions/upload-artifact@v7
       with:
         name: open-design-${{ inputs.channel }}-${{ inputs.artifact-id }}-publish-manifest
@@ -133,13 +138,15 @@ runs:
         if-no-files-found: error
 
     - name: Upload ${{ inputs.target }} Standalone contribution
+      if: ${{ inputs.handoff-enabled == 'true' }}
       uses: actions/upload-artifact@v7
       with:
         name: open-design-${{ inputs.channel }}-closure-${{ inputs.platform }}
-        path: ${{ runner.temp }}/release-projection/${{ inputs.target }}/target-contribution.json
+        path: ${{ runner.temp }}/release-closure/targets/${{ inputs.platform }}/target-contribution.json
         if-no-files-found: error
 
     - name: Upload ${{ inputs.target }} projection result
+      if: ${{ inputs.handoff-enabled == 'true' }}
       uses: actions/upload-artifact@v7
       with:
         name: open-design-${{ inputs.channel }}-${{ inputs.target }}-build-result

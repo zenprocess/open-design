@@ -28,6 +28,7 @@ if (bot == null) {
     throw new Error(`unsupported release notification channel: ${channel}`);
   }
   const input: ReleaseNotificationInput = {
+    activationCompletedAt: optionalEnv("RELEASE_ACTIVATION_COMPLETED_AT"),
     actor: optionalEnv("RELEASE_ACTOR"),
     branch: optionalEnv("RELEASE_BRANCH"),
     channel,

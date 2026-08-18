@@ -1,0 +1,127 @@
+name: Plan public content acceptance
+description: Resolve the sole reusable public-acceptance execution topology
+
+inputs:
+  acceptance-matrix:
+    required: true
+  content-identities:
+    required: true
+
+outputs:
+  acceptance_count:
+    value: ${{ steps.selection.outputs.acceptance_count }}
+  acceptance_matrix:
+    value: ${{ steps.selection.outputs.acceptance_matrix }}
+  mac_arm64_closure:
+    value: ${{ steps.identities.outputs.mac_arm64_closure }}
+  mac_arm64_run:
+    value: ${{ steps.selection.outputs.mac_arm64_run }}
+  mac_arm64_semantic:
+    value: ${{ steps.mac_arm64.outputs.hash }}
+  mac_arm64_shell:
+    value: ${{ steps.identities.outputs.mac_arm64_shell }}
+  mac_x64_closure:
+    value: ${{ steps.identities.outputs.mac_x64_closure }}
+  mac_x64_run:
+    value: ${{ steps.selection.outputs.mac_x64_run }}
+  mac_x64_semantic:
+    value: ${{ steps.mac_x64.outputs.hash }}
+  mac_x64_shell:
+    value: ${{ steps.identities.outputs.mac_x64_shell }}
+  reuse_json:
+    value: ${{ steps.selection.outputs.reuse_json }}
+  win_x64_closure:
+    value: ${{ steps.identities.outputs.win_x64_closure }}
+  win_x64_run:
+    value: ${{ steps.selection.outputs.win_x64_run }}
+  win_x64_semantic:
+    value: ${{ steps.win_x64.outputs.hash }}
+  win_x64_shell:
+    value: ${{ steps.identities.outputs.win_x64_shell }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve acceptance content identities
+      id: identities
+      uses: actions/github-script@v8
+      env:
+        CONTENT_IDENTITIES: ${{ inputs.content-identities }}
+      with:
+        script: |
+          const identities = JSON.parse(process.env.CONTENT_IDENTITIES || "{}");
+          const targets = ["mac_arm64", "mac_x64", "win_x64"];
+          const digest = /^sha256:[0-9a-f]{64}$/;
+          const enabled = targets.every((target) => digest.test(identities[target]?.closure || "") && digest.test(identities[target]?.shell || ""));
+          core.setOutput("enabled", String(enabled));
+          for (const target of targets) {
+            core.setOutput(`${target}_closure`, identities[target]?.closure || "");
+            core.setOutput(`${target}_shell`, identities[target]?.shell || "");
+          }
+
+    - name: Probe mac_arm64 public acceptance proof
+      id: mac_arm64
+      if: ${{ steps.identities.outputs.enabled == 'true' }}
+      uses: ./.github/actions/hash-skip
+      env:
+        HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.mac_arm64_closure }}
+        HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.mac_arm64_shell }}
+      with:
+        hash_skip: release.public-acceptance.mac
+
+    - name: Probe mac_x64 public acceptance proof
+      id: mac_x64
+      if: ${{ steps.identities.outputs.enabled == 'true' }}
+      uses: ./.github/actions/hash-skip
+      env:
+        HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.mac_x64_closure }}
+        HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.mac_x64_shell }}
+      with:
+        hash_skip: release.public-acceptance.mac
+
+    - name: Probe win_x64 public acceptance proof
+      id: win_x64
+      if: ${{ steps.identities.outputs.enabled == 'true' }}
+      uses: ./.github/actions/hash-skip
+      env:
+        HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.win_x64_closure }}
+        HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.win_x64_shell }}
+      with:
+        hash_skip: release.public-acceptance.win
+
+    - name: Select public acceptance topology
+      id: selection
+      uses: actions/github-script@v8
+      env:
+        ACCEPTANCE_MATRIX: ${{ inputs.acceptance-matrix }}
+        CONTENT_IDENTITIES: ${{ inputs.content-identities }}
+        CONTENT_IDENTITIES_ENABLED: ${{ steps.identities.outputs.enabled }}
+        MAC_ARM64_HASH: ${{ steps.mac_arm64.outputs.hash }}
+        MAC_ARM64_REUSE: ${{ steps.mac_arm64.outputs.skip }}
+        MAC_X64_HASH: ${{ steps.mac_x64.outputs.hash }}
+        MAC_X64_REUSE: ${{ steps.mac_x64.outputs.skip }}
+        WIN_X64_HASH: ${{ steps.win_x64.outputs.hash }}
+        WIN_X64_REUSE: ${{ steps.win_x64.outputs.skip }}
+      with:
+        script: |
+          const matrix = JSON.parse(process.env.ACCEPTANCE_MATRIX);
+          const identities = JSON.parse(process.env.CONTENT_IDENTITIES || "{}");
+          const enabled = process.env.CONTENT_IDENTITIES_ENABLED === "true";
+          const proof = {
+            mac_arm64: { hash: process.env.MAC_ARM64_HASH, reuse: process.env.MAC_ARM64_REUSE === "true" },
+            mac_x64: { hash: process.env.MAC_X64_HASH, reuse: process.env.MAC_X64_REUSE === "true" },
+            win_x64: { hash: process.env.WIN_X64_HASH, reuse: process.env.WIN_X64_REUSE === "true" },
+          };
+          const include = matrix.include.filter(({ target }) => !enabled || !proof[target].reuse).map((entry) => ({
+            ...entry,
+            closure_identity_digest: identities[entry.target]?.closure || "",
+            semantic_digest: enabled ? proof[entry.target].hash : "",
+            shell_identity_digest: identities[entry.target]?.shell || "",
+          }));
+          const reuse = Object.fromEntries(matrix.include.filter(({ target }) => enabled && proof[target].reuse).map(({ target }) => [target, proof[target].hash]));
+          core.setOutput("acceptance_count", String(include.length));
+          core.setOutput("acceptance_matrix", JSON.stringify({ include }));
+          core.setOutput("reuse_json", JSON.stringify(reuse));
+          for (const target of ["mac_arm64", "mac_x64", "win_x64"]) {
+            core.setOutput(`${target}_run`, String(include.some((entry) => entry.target === target) && enabled));
+          }

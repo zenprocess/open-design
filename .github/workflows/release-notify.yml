@@ -3,6 +3,10 @@ name: release-notify
 on:
   workflow_call:
     inputs:
+      activation_completed_at:
+        required: false
+        type: string
+        default: ""
       actor:
         required: false
         type: string
@@ -121,6 +125,7 @@ jobs:
         id: post
         continue-on-error: true
         env:
+          RELEASE_ACTIVATION_COMPLETED_AT: ${{ inputs.activation_completed_at }}
           RELEASE_ACTOR: ${{ inputs.actor }}
           RELEASE_BRANCH: ${{ inputs.branch }}
           RELEASE_CHANNEL: ${{ inputs.channel }}

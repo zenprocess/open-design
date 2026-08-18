@@ -19,10 +19,13 @@ export type ReleaseRunFailure = {
 
 export type ReleaseRunContext = {
   durationMs: number;
+  observedAtMs: number;
   pullRequest: {
     number: number;
     url: string;
   } | null;
+  queueDurationMs: number;
+  runStartedAtMs: number;
 };
 
 type GitHubCompareCommit = {
@@ -110,10 +113,14 @@ export async function loadReleaseRunContext(input: {
     pull_requests?: unknown;
     run_started_at?: unknown;
   };
+  const createdAtMs = Date.parse(text(payload.created_at));
   const startedAt = text(payload.run_started_at) || text(payload.created_at);
   const startedAtMs = Date.parse(startedAt);
   const now = input.now ?? Date.now();
   const durationMs = Number.isFinite(startedAtMs) ? Math.max(0, now - startedAtMs) : 0;
+  const queueDurationMs = Number.isFinite(createdAtMs) && Number.isFinite(startedAtMs)
+    ? Math.max(0, startedAtMs - createdAtMs)
+    : 0;
   const pullRequests = Array.isArray(payload.pull_requests)
     ? payload.pull_requests.flatMap((entry) => {
       if (entry == null || typeof entry !== "object") return [];
@@ -128,7 +135,13 @@ export async function loadReleaseRunContext(input: {
         url: `https://github.com/${input.repository}/pull/${uniquePullRequests[0]}`,
       }
     : null;
-  return { durationMs, pullRequest };
+  return {
+    durationMs,
+    observedAtMs: now,
+    pullRequest,
+    queueDurationMs,
+    runStartedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,
+  };
 }
 
 function failedStep(value: unknown): string {

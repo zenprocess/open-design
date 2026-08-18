@@ -1,0 +1,71 @@
+name: Activate accepted public release
+description: Project reusable credentials and atomically activate one accepted exact release
+
+inputs:
+  channel:
+    required: true
+  commit:
+    required: true
+  metadata-url:
+    required: true
+  public-origin:
+    required: true
+  release-version:
+    required: true
+  reuse-json:
+    required: true
+
+outputs:
+  activated_at:
+    value: ${{ steps.completed.outputs.activated_at }}
+
+runs:
+  using: composite
+  steps:
+    - name: Project reusable public acceptance credentials
+      if: ${{ inputs.reuse-json != '{}' }}
+      shell: bash
+      env:
+        RELEASE_COMMIT: ${{ inputs.commit }}
+        RELEASE_METADATA_URL: ${{ inputs.metadata-url }}
+        RELEASE_PUBLIC_ACCEPTANCE_CREDENTIAL_DIR: ${{ runner.temp }}/public-acceptance
+        RELEASE_PUBLIC_ACCEPTANCE_REUSE_JSON: ${{ inputs.reuse-json }}
+        RELEASE_PUBLIC_ACCEPTANCE_WORK_DIR: ${{ runner.temp }}/public-acceptance-projection
+      run: pnpm exec tools-release project-public-acceptance
+
+    - name: Activate accepted immutable exact metadata with CAS
+      shell: bash
+      env:
+        RELEASE_ACTIVATION_WORK_DIR: ${{ runner.temp }}/release-activation
+        RELEASE_CHANNEL: ${{ inputs.channel }}
+        RELEASE_OUTPUTS_PATH: ${{ runner.temp }}/release-activation/outputs.json
+        RELEASE_PUBLIC_ACCEPTANCE_CREDENTIAL_DIR: ${{ runner.temp }}/public-acceptance
+        RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+      run: pnpm exec tools-release activate-public-release
+
+    - name: Read back activated exact public feed
+      shell: bash
+      env:
+        RELEASE_LATEST_METADATA_URL: ${{ inputs.public-origin }}/${{ inputs.channel }}/latest/metadata.json
+        RELEASE_METADATA_URL: ${{ inputs.metadata-url }}
+        RELEASE_PUBLIC_FEED_REPORT_PATH: ${{ runner.temp }}/release-activation/public-feed-observation.json
+      run: pnpm exec tools-release observe-public-feed
+
+    - name: Publish activation summary
+      shell: bash
+      run: |
+        {
+          echo "## Accepted exact activation"
+          echo ""
+          echo "- version: \`${{ inputs.release-version }}\`"
+          echo "- commit: \`${{ inputs.commit }}\`"
+          echo "- mac_arm64/mac_x64/win_x64 public artifact smoke: \`success\`"
+          echo "- latest CAS and public readback: \`success\`"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Record activation completion
+      id: completed
+      uses: actions/github-script@v8
+      with:
+        script: core.setOutput("activated_at", new Date().toISOString())

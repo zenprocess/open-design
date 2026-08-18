@@ -1,0 +1,65 @@
+name: Stage exact release metadata
+description: Merge one Closure graph, publish immutable metadata, and stage its run-scoped acceptance feed
+
+inputs:
+  exact-name:
+    required: true
+  release-version:
+    required: true
+
+outputs:
+  acceptance_latest_url:
+    value: ${{ steps.acceptance_feed.outputs.latest_url }}
+  release_state:
+    value: ${{ steps.distribute.outputs.release_state }}
+  version_metadata_url:
+    value: ${{ steps.distribute.outputs.version_metadata_url }}
+  mac_arm64_url:
+    value: ${{ steps.distribute.outputs.mac_arm64_url }}
+  mac_x64_url:
+    value: ${{ steps.distribute.outputs.mac_x64_url }}
+  win_x64_url:
+    value: ${{ steps.distribute.outputs.win_x64_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Merge the sole version-wide Standalone graph
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/release-closure"
+        pnpm exec tools-release merge-closure-distribution \
+          "$RUNNER_TEMP/release-closure/shared/shared-contribution.json" \
+          "$RUNNER_TEMP/release-closure/targets/darwin-arm64/target-contribution.json" \
+          "$RUNNER_TEMP/release-closure/targets/darwin-x64/target-contribution.json" \
+          "$RUNNER_TEMP/release-closure/targets/win32-x64/target-contribution.json" \
+          --output "$RUNNER_TEMP/release-closure/closure-distribution.json"
+
+    - name: Accept the N-1 Shell preflight boundary
+      shell: bash
+      run: pnpm exec tools-release verify-closure-preflight --channel "${{ inputs.exact-name }}" --manifest "$RUNNER_TEMP/release-closure/closure-distribution.json" --release-version "${{ inputs.release-version }}"
+
+    - name: Distribute staged exact metadata
+      id: distribute
+      uses: ./.github/actions/release/publish-metadata
+      with:
+        enable_mac_arm64: true
+        enable_mac_x64: true
+        enable_win_x64: true
+        mac_arm64_result: success
+        mac_x64_result: success
+        win_x64_result: success
+
+    - name: Stage run-scoped mutable acceptance feed
+      id: acceptance_feed
+      shell: bash
+      env:
+        RELEASE_ACCEPTANCE_FEED_PREFIX: ${{ inputs.exact-name }}/acceptance/runs/${{ github.run_id }}-${{ github.run_attempt }}
+        RELEASE_METADATA_PATH: ${{ runner.temp }}/release-metadata/metadata.json
+        RELEASE_VERSION: ${{ inputs.release-version }}
+      run: |
+        set -euo pipefail
+        pnpm exec tools-release stage-acceptance-feed
+        origin="${RELEASE_PUBLIC_ORIGIN%/}"
+        echo "latest_url=$origin/$RELEASE_ACCEPTANCE_FEED_PREFIX/latest/metadata.json" >> "$GITHUB_OUTPUT"

@@ -150,6 +150,15 @@ jobs:
       version_lock_key: ${{ steps.reservation.outputs.version_lock_key }}
       build_matrix: ${{ steps.selection.outputs.build_matrix }}
       build_count: ${{ steps.selection.outputs.build_count }}
+      hot_activated: ${{ steps.hot_activate.outcome == 'success' }}
+      hot_activation_completed_at: ${{ steps.hot_activate.outputs.activated_at }}
+      hot_staged: ${{ steps.hot_stage.outcome == 'success' }}
+      hot_acceptance_latest_url: ${{ steps.hot_stage.outputs.acceptance_latest_url }}
+      hot_release_state: ${{ steps.hot_stage.outputs.release_state }}
+      hot_version_metadata_url: ${{ steps.hot_stage.outputs.version_metadata_url }}
+      hot_mac_arm64_url: ${{ steps.hot_stage.outputs.mac_arm64_url }}
+      hot_mac_x64_url: ${{ steps.hot_stage.outputs.mac_x64_url }}
+      hot_win_x64_url: ${{ steps.hot_stage.outputs.win_x64_url }}
     steps:
       - name: Validate checkout ref shape
         env:
@@ -294,6 +303,7 @@ jobs:
 
       - name: Prepare immutable candidate identity
         id: candidate
+        if: ${{ !inputs.promote }}
         env:
           RELEASE_CANDIDATE_SPEC_PATH: ${{ runner.temp }}/release-candidate/spec.json
         run: |
@@ -320,6 +330,7 @@ jobs:
           pnpm exec tools-release prepare-candidate
 
       - name: Upload immutable candidate spec
+        if: ${{ !inputs.promote }}
         uses: actions/upload-artifact@v7
         with:
           name: open-design-${{ inputs.exact_name }}-candidate-spec
@@ -471,6 +482,7 @@ jobs:
           RELEASE_VERSION_LOCK_REQUIRED: "true"
         with:
           channel: ${{ inputs.exact_name }}
+          handoff-enabled: ${{ steps.selection.outputs.build_count != '0' || !inputs.publish || !inputs.promote }}
           identity-digest: ${{ steps.execution.outputs.shared_closure_digest }}
           min-shell-version: ${{ steps.exact.outputs.closure_min_shell_version }}
           publish-enabled: "true"
@@ -492,6 +504,7 @@ jobs:
         with:
           artifact-id: mac-arm64
           channel: ${{ inputs.exact_name }}
+          handoff-enabled: ${{ steps.selection.outputs.build_count != '0' || !inputs.publish || !inputs.promote }}
           closure-identity-digest: ${{ steps.execution.outputs.mac_arm64_closure_digest }}
           platform: darwin-arm64
           public-origin: ${{ env.RELEASE_PUBLIC_ORIGIN }}
@@ -507,6 +520,7 @@ jobs:
         with:
           artifact-id: mac-x64
           channel: ${{ inputs.exact_name }}
+          handoff-enabled: ${{ steps.selection.outputs.build_count != '0' || !inputs.publish || !inputs.promote }}
           closure-identity-digest: ${{ steps.execution.outputs.mac_x64_closure_digest }}
           platform: darwin-x64
           public-origin: ${{ env.RELEASE_PUBLIC_ORIGIN }}
@@ -522,6 +536,7 @@ jobs:
         with:
           artifact-id: win-x64
           channel: ${{ inputs.exact_name }}
+          handoff-enabled: ${{ steps.selection.outputs.build_count != '0' || !inputs.publish || !inputs.promote }}
           closure-identity-digest: ${{ steps.execution.outputs.win_x64_closure_digest }}
           platform: win32-x64
           public-origin: ${{ env.RELEASE_PUBLIC_ORIGIN }}
@@ -529,6 +544,64 @@ jobs:
           shell-identity-digest: ${{ steps.execution.outputs.win_x64_shell_digest }}
           shell-plan-path: ${{ runner.temp }}/release-identity-profiles/win-x64.json
           target: win_x64
+
+      - name: Stage fully reused exact content
+        id: hot_stage
+        if: ${{ steps.selection.outputs.build_count == '0' && inputs.publish && inputs.promote }}
+        uses: ./.github/actions/release/exact/stage
+        env:
+          BASE_VERSION: ${{ steps.exact.outputs.base_version }}
+          RELEASE_ACTIVATE_LATEST: "false"
+          RELEASE_CHANNEL: ${{ inputs.exact_name }}
+          RELEASE_CLOSURE_DISTRIBUTION_MANIFEST_PATH: ${{ runner.temp }}/release-closure/closure-distribution.json
+          RELEASE_CLOSURE_DISTRIBUTION_REQUIRED: "true"
+          RELEASE_INSTALLATION_VERSION_MIN_BETA: ${{ vars.RELEASE_LAUNCHER_VERSION_MIN_BETA }}
+          RELEASE_INSTALLATION_VERSION_MIN_STABLE: ${{ vars.RELEASE_LAUNCHER_VERSION_MIN_STABLE }}
+          RELEASE_INSTALLATION_VERSION_MIN_URL_BETA: ${{ vars.RELEASE_LAUNCHER_VERSION_MIN_URL_BETA }}
+          RELEASE_INSTALLATION_VERSION_MIN_URL_STABLE: ${{ vars.RELEASE_LAUNCHER_VERSION_MIN_URL_STABLE }}
+          RELEASE_LATEST_CAS_REQUIRED: "true"
+          RELEASE_LEGACY_INSTALLATION_MIGRATION_REQUIRED: "true"
+          RELEASE_MANIFEST_DIR: ${{ runner.temp }}/release-platform-manifests
+          RELEASE_PUBLIC_ORIGIN: ${{ env.RELEASE_PUBLIC_ORIGIN }}
+          RELEASE_SHELL_REQUIRED: "true"
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+          RELEASE_VERSION: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
+          RELEASE_VERSION_LOCK_KEY: ${{ steps.reservation.outputs.version_lock_key }}
+          RELEASE_VERSION_LOCK_REQUIRED: "true"
+          STATE_SOURCE: ${{ steps.reservation.outputs.state_source || steps.exact.outputs.state_source }}
+        with:
+          exact-name: ${{ inputs.exact_name }}
+          release-version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
+
+      - name: Plan fully reused public acceptance
+        id: hot_acceptance
+        if: ${{ steps.hot_stage.outcome == 'success' }}
+        uses: ./.github/actions/release/public-acceptance/plan
+        with:
+          acceptance-matrix: '{"include":[{"artifact_dir":"dmg","os":"mac","runner":"macos-14","target":"mac_arm64"},{"artifact_dir":"dmg","os":"mac","runner":"macos-15-intel","target":"mac_x64"},{"artifact_dir":"builder","os":"win","runner":"windows-latest","target":"win_x64"}]}'
+          content-identities: ${{ format('{{"mac_arm64":{{"closure":"{0}","shell":"{1}"}},"mac_x64":{{"closure":"{2}","shell":"{3}"}},"win_x64":{{"closure":"{4}","shell":"{5}"}}}}', steps.execution.outputs.mac_arm64_closure_digest, steps.execution.outputs.mac_arm64_shell_digest, steps.execution.outputs.mac_x64_closure_digest, steps.execution.outputs.mac_x64_shell_digest, steps.execution.outputs.win_x64_closure_digest, steps.execution.outputs.win_x64_shell_digest) }}
+
+      - name: Activate fully reused exact release
+        id: hot_activate
+        if: ${{ steps.hot_acceptance.outputs.acceptance_count == '0' }}
+        uses: ./.github/actions/release/public-acceptance/activate
+        env:
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+        with:
+          channel: ${{ inputs.exact_name }}
+          commit: ${{ env.BUILT_SHA }}
+          metadata-url: ${{ steps.hot_stage.outputs.version_metadata_url }}
+          public-origin: ${{ env.RELEASE_PUBLIC_ORIGIN }}
+          release-version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
+          reuse-json: ${{ steps.hot_acceptance.outputs.reuse_json }}
 
   build:
     name: Build exact ${{ matrix.target }}
@@ -766,16 +839,17 @@ jobs:
         always() &&
         !cancelled() &&
         needs.metadata.result == 'success' &&
+        needs.metadata.outputs.hot_staged != 'true' &&
         (needs.build.result == 'success' || needs.build.result == 'skipped')
       }}
     runs-on: ubuntu-latest
     outputs:
-      acceptance_latest_url: ${{ steps.acceptance_feed.outputs.latest_url }}
-      release_state: ${{ steps.distribute.outputs.release_state }}
-      version_metadata_url: ${{ steps.distribute.outputs.version_metadata_url }}
-      mac_arm64_url: ${{ steps.distribute.outputs.mac_arm64_url }}
-      win_x64_url: ${{ steps.distribute.outputs.win_x64_url }}
-      mac_x64_url: ${{ steps.distribute.outputs.mac_x64_url }}
+      acceptance_latest_url: ${{ steps.staged.outputs.acceptance_latest_url }}
+      release_state: ${{ steps.staged.outputs.release_state }}
+      version_metadata_url: ${{ steps.staged.outputs.version_metadata_url }}
+      mac_arm64_url: ${{ steps.staged.outputs.mac_arm64_url }}
+      win_x64_url: ${{ steps.staged.outputs.win_x64_url }}
+      mac_x64_url: ${{ steps.staged.outputs.mac_x64_url }}
       mac_arm64_smoke_result: ${{ steps.platform_results.outputs.mac_arm64_smoke_result }}
       mac_x64_smoke_result: ${{ steps.platform_results.outputs.mac_x64_smoke_result }}
       win_x64_smoke_result: ${{ steps.platform_results.outputs.win_x64_smoke_result }}
@@ -868,38 +942,12 @@ jobs:
               core.setOutput(`${target}_smoke_result`, String(result.smokeResult || ""));
             }
 
-      - name: Merge the sole version-wide Standalone graph
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/release-closure"
-          pnpm exec tools-release merge-closure-distribution \
-            "$RUNNER_TEMP/release-closure/shared/shared-contribution.json" \
-            "$RUNNER_TEMP/release-closure/targets/darwin-arm64/target-contribution.json" \
-            "$RUNNER_TEMP/release-closure/targets/darwin-x64/target-contribution.json" \
-            "$RUNNER_TEMP/release-closure/targets/win32-x64/target-contribution.json" \
-            --output "$RUNNER_TEMP/release-closure/closure-distribution.json"
-
-      - name: Accept the N-1 Shell preflight boundary
-        run: |
-          pnpm exec tools-release verify-closure-preflight \
-            --channel "${{ inputs.exact_name }}" \
-            --manifest "$RUNNER_TEMP/release-closure/closure-distribution.json" \
-            --release-version "${{ needs.metadata.outputs.release_version }}"
-
-      - name: Distribute staged exact metadata
-        id: distribute
-        uses: ./.github/actions/release/publish-metadata
+      - name: Stage exact release content
+        id: staged
+        uses: ./.github/actions/release/exact/stage
         with:
-          enable_mac_arm64: true
-          enable_mac_x64: true
-          enable_win_x64: true
-          # Replayed and runner-executed targets both reach this job only after
-          # their manifests/contributions/results exist. An empty dynamic matrix
-          # reports the build job as skipped, which is execution topology rather
-          # than a platform outcome.
-          mac_arm64_result: success
-          mac_x64_result: success
-          win_x64_result: success
+          exact-name: ${{ inputs.exact_name }}
+          release-version: ${{ needs.metadata.outputs.release_version }}
         env:
           BASE_VERSION: ${{ needs.metadata.outputs.base_version }}
           RELEASE_ACTIVATE_LATEST: "false"
@@ -925,23 +973,6 @@ jobs:
           RELEASE_VERSION: ${{ needs.metadata.outputs.release_version }}
           STATE_SOURCE: ${{ needs.metadata.outputs.state_source }}
 
-      - name: Stage run-scoped mutable acceptance feed
-        id: acceptance_feed
-        env:
-          RELEASE_ACCEPTANCE_FEED_PREFIX: ${{ inputs.exact_name }}/acceptance/runs/${{ github.run_id }}-${{ github.run_attempt }}
-          RELEASE_METADATA_PATH: ${{ runner.temp }}/release-metadata/metadata.json
-          RELEASE_PUBLIC_ORIGIN: ${{ inputs.release_public_origin != '' && inputs.release_public_origin || vars.CLOUDFLARE_R2_RELEASES_PUBLIC_ORIGIN }}
-          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
-          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
-          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
-          RELEASE_STORAGE_REGION: auto
-          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
-          RELEASE_VERSION: ${{ needs.metadata.outputs.release_version }}
-        run: |
-          set -euo pipefail
-          pnpm exec tools-release stage-acceptance-feed
-          origin="${RELEASE_PUBLIC_ORIGIN%/}"
-          echo "latest_url=$origin/$RELEASE_ACCEPTANCE_FEED_PREFIX/latest/metadata.json" >> "$GITHUB_OUTPUT"
 
   accept:
     name: Accept and activate exact release
@@ -954,8 +985,9 @@ jobs:
         inputs.publish &&
         inputs.promote &&
         needs.metadata.result == 'success' &&
-        needs.stage.result == 'success' &&
-        needs.stage.outputs.release_state == 'complete'
+        needs.metadata.outputs.hot_activated != 'true' &&
+        (needs.stage.result == 'success' || needs.metadata.outputs.hot_staged == 'true') &&
+        (needs.stage.outputs.release_state == 'complete' || needs.metadata.outputs.hot_release_state == 'complete')
       }}
     uses: ./.github/workflows/distribution-exact-accept.yml
     secrets: inherit
@@ -963,8 +995,8 @@ jobs:
       commit: ${{ needs.metadata.outputs.commit }}
       content_identities: ${{ format('{{"mac_arm64":{{"closure":"{0}","shell":"{1}"}},"mac_x64":{{"closure":"{2}","shell":"{3}"}},"win_x64":{{"closure":"{4}","shell":"{5}"}}}}', needs.metadata.outputs.mac_arm64_closure_identity_digest, needs.metadata.outputs.mac_arm64_shell_identity_digest, needs.metadata.outputs.mac_x64_closure_identity_digest, needs.metadata.outputs.mac_x64_shell_identity_digest, needs.metadata.outputs.win_x64_closure_identity_digest, needs.metadata.outputs.win_x64_shell_identity_digest) }}
       exact_name: ${{ inputs.exact_name }}
-      metadata_url: ${{ needs.stage.outputs.version_metadata_url }}
-      mutable_metadata_url: ${{ needs.stage.outputs.acceptance_latest_url }}
+      metadata_url: ${{ needs.metadata.outputs.hot_version_metadata_url || needs.stage.outputs.version_metadata_url }}
+      mutable_metadata_url: ${{ needs.metadata.outputs.hot_acceptance_latest_url || needs.stage.outputs.acceptance_latest_url }}
       public_origin: ${{ inputs.release_public_origin != '' && inputs.release_public_origin || vars.CLOUDFLARE_R2_RELEASES_PUBLIC_ORIGIN }}
       release_version: ${{ needs.metadata.outputs.release_version }}
 
@@ -979,27 +1011,28 @@ jobs:
     if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-notify.yml
     with:
+      activation_completed_at: ${{ needs.metadata.outputs.hot_activation_completed_at || needs.accept.outputs.activation_completed_at }}
       actor: ${{ github.actor }}
       branch: ${{ needs.metadata.outputs.branch }}
       channel: ${{ inputs.exact_name }}
       commit: ${{ needs.metadata.outputs.commit }}
       event_name: ${{ github.event_name }}
-      mac_arm64_smoke: ${{ needs.stage.outputs.mac_arm64_smoke_result }}
-      mac_arm64_url: ${{ !inputs.publish && needs.candidate.outputs.mac_arm64_url || needs.stage.outputs.mac_arm64_url }}
-      mac_x64_smoke: ${{ needs.stage.outputs.mac_x64_smoke_result }}
-      mac_x64_url: ${{ !inputs.publish && needs.candidate.outputs.mac_x64_url || needs.stage.outputs.mac_x64_url }}
-      metadata_url: ${{ !inputs.publish && needs.candidate.outputs.manifest_url || needs.stage.outputs.version_metadata_url }}
+      mac_arm64_smoke: ${{ needs.metadata.outputs.hot_staged == 'true' && 'success' || needs.stage.outputs.mac_arm64_smoke_result }}
+      mac_arm64_url: ${{ !inputs.publish && needs.candidate.outputs.mac_arm64_url || needs.metadata.outputs.hot_mac_arm64_url || needs.stage.outputs.mac_arm64_url }}
+      mac_x64_smoke: ${{ needs.metadata.outputs.hot_staged == 'true' && 'success' || needs.stage.outputs.mac_x64_smoke_result }}
+      mac_x64_url: ${{ !inputs.publish && needs.candidate.outputs.mac_x64_url || needs.metadata.outputs.hot_mac_x64_url || needs.stage.outputs.mac_x64_url }}
+      metadata_url: ${{ !inputs.publish && needs.candidate.outputs.manifest_url || needs.metadata.outputs.hot_version_metadata_url || needs.stage.outputs.version_metadata_url }}
       notification_stream: ${{ inputs.notification_stream || 'release' }}
       previous_commit: ${{ needs.metadata.outputs.previous_commit }}
       release_mode: ${{ inputs.publish && (inputs.promote && 'promote' || 'publish') || 'candidate' }}
-      release_result: ${{ needs.accept.result != 'skipped' && needs.accept.result || needs.stage.result != 'skipped' && needs.stage.result || needs.build.result }}
-      release_state: ${{ needs.accept.result == 'success' && 'complete' || needs.stage.outputs.release_state || (needs.build.result == 'success' && 'partial' || 'failed') }}
+      release_result: ${{ needs.metadata.outputs.hot_activated == 'true' && 'success' || needs.accept.result != 'skipped' && needs.accept.result || needs.stage.result != 'skipped' && needs.stage.result || needs.build.result }}
+      release_state: ${{ needs.metadata.outputs.hot_activated == 'true' && 'complete' || needs.accept.result == 'success' && 'complete' || needs.metadata.outputs.hot_release_state || needs.stage.outputs.release_state || (needs.build.result == 'success' && 'partial' || 'failed') }}
       run_attempt: ${{ github.run_attempt }}
       run_number: ${{ github.run_number }}
       triggering_actor: ${{ github.triggering_actor }}
       version: ${{ needs.metadata.outputs.release_version }}
-      win_x64_smoke: ${{ needs.stage.outputs.win_x64_smoke_result }}
-      win_x64_url: ${{ !inputs.publish && needs.candidate.outputs.win_x64_url || needs.stage.outputs.win_x64_url }}
+      win_x64_smoke: ${{ needs.metadata.outputs.hot_staged == 'true' && 'success' || needs.stage.outputs.win_x64_smoke_result }}
+      win_x64_url: ${{ !inputs.publish && needs.candidate.outputs.win_x64_url || needs.metadata.outputs.hot_win_x64_url || needs.stage.outputs.win_x64_url }}
       workflow_name: ${{ github.workflow }}
     secrets:
       bot: ${{ secrets.RELEASE_FEISHU_BETA }}

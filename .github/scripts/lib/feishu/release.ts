@@ -24,6 +24,7 @@ function releaseChannelDisplayLabel(channel: string): string {
 }
 
 export type ReleaseNotificationInput = {
+  activationCompletedAt: string;
   actor: string;
   branch: string;
   channel: string;
@@ -239,6 +240,29 @@ function actorMarkdown(actor: string): string {
     : "未知";
 }
 
+function commitMarkdown(input: ReleaseNotificationInput): string {
+  const shortCommit = input.commit.slice(0, 7);
+  if (shortCommit.length === 0) return "";
+  return input.repository.length > 0
+    ? `[${shortCommit}](https://github.com/${input.repository}/commit/${input.commit})`
+    : shortCommit;
+}
+
+function executionTimingMarkdown(input: ReleaseNotificationInput, execution: ReleaseRunContext | null): string {
+  if (execution == null) return "";
+  const activationMs = Date.parse(input.activationCompletedAt);
+  const hasActivation = Number.isFinite(activationMs)
+    && activationMs >= execution.runStartedAtMs
+    && activationMs <= execution.observedAtMs;
+  const releaseMs = hasActivation ? activationMs - execution.runStartedAtMs : execution.durationMs;
+  const notificationMs = hasActivation ? execution.observedAtMs - activationMs : 0;
+  return [
+    `发布 ${duration(releaseMs)}`,
+    hasActivation ? `通知 ${duration(notificationMs)}` : "",
+    execution.queueDurationMs > 0 ? `排队 ${duration(execution.queueDurationMs)}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
 function triggerLabel(eventName: string): string {
   return {
     push: "Push",
@@ -325,61 +349,43 @@ export function buildReleaseFeishuCard(
     published: warning ? "不可变发布完成（有告警）" : "不可变发布完成 · 未晋升",
     validation: "验证完成",
   }[state];
-  const shortCommit = input.commit.slice(0, 7);
   const fields: FeishuElement[] = [];
   const rerunActor = input.triggeringActor.length > 0 && input.triggeringActor !== input.actor
     ? ` · 重跑 ${actorMarkdown(input.triggeringActor)}`
     : "";
+  const source = [escapeMarkdown(input.branch), commitMarkdown(input)].filter(Boolean).join(" · ");
   fields.push({
-    is_short: true,
-    text: { tag: "lark_md", content: `**触发者**\n${actorMarkdown(input.actor)}${rerunActor}` },
+    is_short: false,
+    text: {
+      tag: "lark_md",
+      content: `**触发** · ${actorMarkdown(input.actor)}${rerunActor} · ${escapeMarkdown(triggerLabel(input.eventName))}`
+        + (source.length > 0 ? ` · ${source}` : ""),
+    },
   });
   fields.push({
-    is_short: true,
-    text: { tag: "lark_md", content: `**触发方式**\n${escapeMarkdown(triggerLabel(input.eventName))}` },
-  });
-  fields.push({
-    is_short: true,
-    text: { tag: "lark_md", content: `**发布模式**\n${releaseModeLabel(input.releaseMode)}` },
+    is_short: false,
+    text: { tag: "lark_md", content: `**模式** · ${releaseModeLabel(input.releaseMode)}` },
   });
   if (input.runNumber.length > 0) {
     const attempt = Number.parseInt(input.runAttempt, 10);
     const attemptLabel = Number.isSafeInteger(attempt) && attempt > 1 ? ` · 第 ${attempt} 次执行` : "";
     const runLabel = `${input.workflowName || "Workflow"} #${input.runNumber}${attemptLabel}`;
     fields.push({
-      is_short: true,
+      is_short: false,
       text: {
         tag: "lark_md",
-        content: input.runUrl.length > 0
-          ? `**执行**\n[${escapeMarkdown(runLabel)}](${input.runUrl})`
-          : `**执行**\n${escapeMarkdown(runLabel)}`,
+        content: `**执行** · ${input.runUrl.length > 0
+          ? `[${escapeMarkdown(runLabel)}](${input.runUrl})`
+          : escapeMarkdown(runLabel)}`
+          + (details.execution?.pullRequest != null
+            ? ` · [PR #${details.execution.pullRequest.number}](${details.execution.pullRequest.url})`
+            : "")
+          + (details.execution != null
+            ? ` · ${executionTimingMarkdown(input, details.execution)}`
+            : ""),
       },
     });
   }
-  if (input.branch.length > 0) fields.push({
-    is_short: true,
-    text: { tag: "lark_md", content: `**分支**\n${escapeMarkdown(input.branch)}` },
-  });
-  if (shortCommit.length > 0) fields.push({
-    is_short: true,
-    text: {
-      tag: "lark_md",
-      content: input.repository.length > 0
-        ? `**提交**\n[${shortCommit}](https://github.com/${input.repository}/commit/${input.commit})`
-        : `**提交**\n${shortCommit}`,
-    },
-  });
-  if (details.execution != null && details.execution.durationMs > 0) fields.push({
-    is_short: true,
-    text: { tag: "lark_md", content: `**耗时**\n${duration(details.execution.durationMs)}` },
-  });
-  if (details.execution?.pullRequest != null) fields.push({
-    is_short: true,
-    text: {
-      tag: "lark_md",
-      content: `**关联 PR**\n[#${details.execution.pullRequest.number}](${details.execution.pullRequest.url})`,
-    },
-  });
   const elements: FeishuElement[] = fields.length > 0
     ? [{ tag: "div", fields }, { tag: "hr" }]
     : [];

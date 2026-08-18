@@ -4,7 +4,7 @@
     "shell"
   ],
   "hashPaths": [
-    ".github/workflows/distribution-exact-accept.yml",
+    ".github/actions/release/public-acceptance/execute/action.yml",
     "e2e/lib/desktop",
     "e2e/lib/vitest",
     "e2e/scripts/release-smoke.ts",
