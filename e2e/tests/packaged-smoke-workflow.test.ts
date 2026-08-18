@@ -185,9 +185,9 @@ const notifyReleaseFeishuWorkflowPath = join(workspaceRoot, ".github", "workflow
 const releaseNotifyWorkflowPath = join(workspaceRoot, ".github", "workflows", "release-notify.yml");
 const cutReleaseWorkflowPath = join(workspaceRoot, ".github", "workflows", "cut-release.yml");
 const cutPatchReleaseWorkflowPath = join(workspaceRoot, ".github", "workflows", "cut-patch-release.yml");
-const feishuCardScriptPath = join(workspaceRoot, "tools", "release", "src", "notifications", "feishu.ts");
-const feishuClientScriptPath = join(workspaceRoot, "tools", "release", "src", "notifications", "feishu-client.ts");
-const feishuNoticeScriptPath = join(workspaceRoot, "tools", "release", "src", "notifications", "feishu-notice.ts");
+const feishuCardScriptPath = join(workspaceRoot, ".github", "scripts", "release_notification.ts");
+const feishuClientScriptPath = join(workspaceRoot, ".github", "scripts", "lib", "feishu", "client.ts");
+const feishuNoticeScriptPath = join(workspaceRoot, ".github", "scripts", "release_notice.ts");
 const landingPageDailyFeishuWorkflowPath = join(workspaceRoot, ".github", "workflows", "landing-page-daily-feishu.yml");
 const landingPageCiWorkflowPath = join(workspaceRoot, ".github", "workflows", "landing-page-ci.yml");
 const landingPageStagingWorkflowPath = join(workspaceRoot, ".github", "workflows", "landing-page-staging.yml");
@@ -2048,7 +2048,7 @@ process.stdin.on("end", () => {
     );
   });
   it("[P2] prerelease publishes github.commit so its changelog has a baseline", async () => {
-    // The Feishu release card computes its changelog as `git log <previous>..<current>`,
+    // The Feishu release card computes its changelog through GitHub's compare API,
     // where <previous> is read from prerelease/latest/metadata.json's `.github.commit`
     // (notify-release-feishu.yml). That field is written by githubInfo() from the
     // RELEASE_COMMIT env. release-beta sets RELEASE_COMMIT on every build + publish job,
@@ -2321,7 +2321,7 @@ process.stdin.on("end", () => {
     expect(dailyWorkflow).toContain("notification_stream: daily");
     expect(dailyWorkflow).not.toContain("force:");
     expect(dailyWorkflow).not.toContain("release_version:");
-    expect(dailyWorkflow).not.toContain("tools/release/src/notifications/");
+    expect(dailyWorkflow).not.toContain(".github/scripts/release_notification.ts");
   });
 
   it("[P1] keeps exact flat while stable and prerelease use their shared distributions", async () => {
@@ -2409,11 +2409,16 @@ process.stdin.on("end", () => {
     expect(notifyCapability).toContain("RELEASE_TRIGGERING_ACTOR: ${{ inputs.triggering_actor }}");
     expect(notifyCapability).toContain("continue-on-error: true");
     expect(notifyCapability).toContain("Feishu release notification failed after notifier retries");
-    expect(notifyCapability).toContain("tools/release/src/notifications/feishu.ts");
+    expect(notifyCapability).toContain(".github/scripts/release_notification.ts");
+    expect(notifyCapability).toContain("fetch-depth: 1");
+    expect(notifyCapability).toContain("filter: blob:none");
+    expect(notifyCapability).toContain("sparse-checkout: .github/scripts");
+    expect(notifyCapability).not.toContain("fetch-depth: 0");
+    expect(notifyCapability).not.toContain("Compute release changelog");
     expect(daily).toContain("notification_stream: daily");
     expect(releaseBranch).toContain("notification_stream: release-branch");
-    expect(daily).not.toContain("tools/release/src/notifications/");
-    expect(releaseBranch).not.toContain("tools/release/src/notifications/");
+    expect(daily).not.toContain(".github/scripts/release_notification.ts");
+    expect(releaseBranch).not.toContain(".github/scripts/release_notification.ts");
   });
 
   it("[P1] keeps macOS and Windows public Closure binding and cold-start evidence symmetric", async () => {
@@ -2490,7 +2495,7 @@ process.stdin.on("end", () => {
     expect(canary).toContain('OD_PACKAGED_E2E_WIN_SMOKE_PROFILE: core');
     expect(canary).toContain("pnpm exec tsx scripts/release-smoke.ts win specs/win.spec.ts");
     expect(canary).toContain("tools-pack win validate-payload");
-    expect(canary).toContain("tools/release/src/notifications/feishu-notice.ts");
+    expect(canary).toContain(".github/scripts/release_notice.ts");
 
     // This lane is a product canary, not a beta/prerelease publication. In
     // particular, a stale main package version must not prevent Windows from
@@ -2591,11 +2596,11 @@ process.stdin.on("end", () => {
       winAction.indexOf("Publish platform"),
     );
     expect(notify).toContain("notification_stream: release-branch");
-    expect(notify).not.toContain("tools/release/src/notifications/");
+    expect(notify).not.toContain(".github/scripts/release_notification.ts");
     expect(releaseNotify).toContain("RELEASE_MAC_ARM64_SMOKE: ${{ inputs.mac_arm64_smoke }}");
     expect(releaseNotify).toContain("RELEASE_WIN_X64_SMOKE: ${{ inputs.win_x64_smoke }}");
-    expect(releaseNotify).toContain("tools/release/src/notifications/feishu.ts");
-    expect(releaseNotify).not.toContain("tools/release/src/notifications/feishu-notice.ts");
+    expect(releaseNotify).toContain(".github/scripts/release_notification.ts");
+    expect(releaseNotify).not.toContain(".github/scripts/release_notice.ts");
     expect(feishuCard).toContain('optionalEnv("RELEASE_MAC_ARM64_SMOKE")');
     expect(feishuCard).toContain('optionalEnv("RELEASE_WIN_X64_SMOKE")');
   });
@@ -2689,7 +2694,7 @@ process.stdin.on("end", () => {
     // Skip path: no branch, no build — only the Feishu notice runs, gated on !published.
     const noticeStep = sectionBetween(workflow, "- name: Notify Feishu that the patch cut was skipped", "- name: Stop here when skipping");
     expect(noticeStep).toContain("if: steps.guard.outputs.published != 'true'");
-    expect(noticeStep).toContain("tools/release/src/notifications/feishu-notice.ts");
+    expect(noticeStep).toContain(".github/scripts/release_notice.ts");
     // Every branch-cutting step must be gated on the guard passing: assert the
     // guard `if:` is the line immediately after each step name.
     for (const step of ["Bail out if the branch already exists", "Create branch + bump version + push", "Create backport label"]) {
@@ -2730,7 +2735,7 @@ process.stdin.on("end", () => {
     ] as const) {
       const step = sectionBetween(workflow, "- name: Notify Feishu that the branch was cut", "\n        run:");
       // Same standalone notifier + the shared release webhook/secret.
-      expect(workflow, label).toContain("run: node --experimental-strip-types tools/release/src/notifications/feishu-notice.ts");
+      expect(workflow, label).toContain("run: node --experimental-strip-types .github/scripts/release_notice.ts");
       expect(step, label).toContain("FEISHU_WEBHOOK: ${{ secrets.FEISHU_RELEASE_WEBHOOK }}");
       // Names the version's backport label in the card body.
       expect(step, label).toContain("backport release/v${{ steps.ver.outputs.version }}");

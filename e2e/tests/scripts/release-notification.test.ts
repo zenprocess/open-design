@@ -1,23 +1,18 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import { describe, expect, it } from "vitest";
 
-import { decodeReleaseFeishuBot } from "../src/notifications/bot-codec.js";
+import { decodeReleaseFeishuBot } from "../../../.github/scripts/lib/feishu/client.js";
 import {
   buildReleaseFeishuCard,
   loadReleaseNotificationDetails,
   releaseNotificationInternals,
   type ReleaseNotificationInput,
-} from "../src/notifications/release-card.js";
+} from "../../../.github/scripts/lib/feishu/release.js";
 
 function input(overrides: Partial<ReleaseNotificationInput> = {}): ReleaseNotificationInput {
   return {
     actor: "alice",
     branch: "feat/standalone-closure",
     channel: "beta",
-    changelogFile: "",
     commit: "0123456789abcdef0123456789abcdef01234567",
     eventName: "workflow_dispatch",
     macArm64Smoke: "success",
@@ -66,6 +61,7 @@ function metadata() {
 }
 
 const emptyDetails = {
+  changelog: [],
   coldStarts: [],
   execution: null,
   failures: [],
@@ -107,29 +103,38 @@ describe("release Feishu notification", () => {
   });
 
   it("keeps successful cards compact and formats a bounded changelog", async () => {
-    const root = mkdtempSync(join(tmpdir(), "release-card-"));
-    const changelogFile = join(root, "changelog.txt");
-    writeFileSync(changelogFile, [
-      "feat: first change (1111111)",
-      "fix: second change (2222222)",
-      "refactor: third change (3333333)",
-      "test: fourth change (4444444)",
-      "docs: fifth change (5555555)",
-      "chore: hidden sixth change (6666666)",
-    ].join("\n"));
-    try {
-      const details = await loadReleaseNotificationDetails(input(), (async (request: string | URL | Request) => {
-        expect(String(request)).toContain("/actions/runs/1");
-        return Response.json({
-          created_at: "2026-08-17T03:45:00Z",
-          pull_requests: [{ number: 6956 }],
-          run_started_at: "2026-08-17T03:45:00Z",
-        });
-      }) as typeof fetch, "github-token");
-      const card = buildReleaseFeishuCard(input({ changelogFile, releaseMode: "promote" }), details);
+    const details = await loadReleaseNotificationDetails(input(), (async (request: string | URL | Request) => {
+      const url = String(request);
+      if (url.includes("/compare/")) return Response.json({
+        commits: [
+          { commit: { message: "chore: hidden oldest change" }, parents: [{}], sha: "0".repeat(40) },
+          { commit: { message: "feat: first change\n\nbody" }, parents: [{}], sha: "1".repeat(40) },
+          { commit: { message: "fix: second change" }, parents: [{}], sha: "2".repeat(40) },
+          { commit: { message: "refactor: third change" }, parents: [{}], sha: "3".repeat(40) },
+          { commit: { message: "test: fourth change" }, parents: [{}], sha: "4".repeat(40) },
+          { commit: { message: "docs: fifth change" }, parents: [{}], sha: "5".repeat(40) },
+          { commit: { message: "merge: hidden" }, parents: [{}, {}], sha: "6".repeat(40) },
+        ],
+      });
+      expect(url).toContain("/actions/runs/1");
+      return Response.json({
+        created_at: "2026-08-17T03:45:00Z",
+        pull_requests: [{ number: 6956 }],
+        run_started_at: "2026-08-17T03:45:00Z",
+      });
+    }) as typeof fetch, "github-token");
+    const card = buildReleaseFeishuCard(input({ releaseMode: "promote" }), details);
       const serialized = JSON.stringify(card);
       expect(card.header).toMatchObject({ template: "green" });
       expect(details).toEqual({
+        changelog: [
+          `docs: fifth change (${"5".repeat(40)})`,
+          `test: fourth change (${"4".repeat(40)})`,
+          `refactor: third change (${"3".repeat(40)})`,
+          `fix: second change (${"2".repeat(40)})`,
+          `feat: first change (${"1".repeat(40)})`,
+          `chore: hidden oldest change (${"0".repeat(40)})`,
+        ],
         coldStarts: [],
         execution: expect.objectContaining({
           durationMs: expect.any(Number),
@@ -154,15 +159,12 @@ describe("release Feishu notification", () => {
       expect(serialized).toContain("[#6956](https://github.com/nexu-io/open-design/pull/6956)");
       expect(serialized).toContain("耗时");
       expect(serialized).not.toContain("Closure 冷启动");
-      expect(serialized).not.toContain("hidden sixth change");
+      expect(serialized).not.toContain("hidden oldest change");
       expect(serialized).toContain("Mac Arm");
       expect(serialized).toContain("Mac x64");
       expect(serialized).toContain("Win x64");
       expect(serialized).toContain("发布详情");
       expect(serialized).toContain("GitHub Actions");
-    } finally {
-      rmSync(root, { force: true, recursive: true });
-    }
   });
 
   it("loads failed jobs and suppresses unaccepted downloads on failure", async () => {
@@ -201,6 +203,7 @@ describe("release Feishu notification", () => {
     expect(releaseNotificationInternals.notificationState(input({ releaseResult: "failure" }))).toBe("failed");
     expect(releaseNotificationInternals.notificationState(input({ releaseMode: "prepublish" }))).toBe("validation");
     const card = buildReleaseFeishuCard(input({ winX64Smoke: "failure" }), {
+      changelog: [],
       coldStarts: [],
       execution: null,
       failures: [],

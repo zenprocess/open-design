@@ -21,7 +21,7 @@ import {
   postFeishuWebhook,
   requiredEnv as required,
   type FeishuCard,
-} from "./feishu-client.ts";
+} from "./lib/feishu/client.ts";
 
 const webhook = required("FEISHU_WEBHOOK");
 const signSecret = optional("FEISHU_SIGN_SECRET");

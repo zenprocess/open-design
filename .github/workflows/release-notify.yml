@@ -108,25 +108,9 @@ jobs:
         uses: actions/checkout@v6.0.2
         with:
           ref: ${{ inputs.commit != '' && inputs.commit || github.sha }}
-          fetch-depth: 0
-
-      - name: Compute release changelog
-        id: changelog
-        shell: bash
-        env:
-          CURRENT_COMMIT: ${{ inputs.commit }}
-          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
-        run: |
-          set -euo pipefail
-          changelog="$RUNNER_TEMP/release-changelog.txt"
-          : > "$changelog"
-          if [ -n "$PREVIOUS_COMMIT" ] \
-            && [ -n "$CURRENT_COMMIT" ] \
-            && git cat-file -e "${PREVIOUS_COMMIT}^{commit}" 2>/dev/null \
-            && git cat-file -e "${CURRENT_COMMIT}^{commit}" 2>/dev/null; then
-            git log --no-merges --pretty=format:'%s (%h)' "${PREVIOUS_COMMIT}..${CURRENT_COMMIT}" > "$changelog" || true
-          fi
-          echo "path=$changelog" >> "$GITHUB_OUTPUT"
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github/scripts
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -140,7 +124,6 @@ jobs:
           RELEASE_ACTOR: ${{ inputs.actor }}
           RELEASE_BRANCH: ${{ inputs.branch }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
-          RELEASE_CHANGELOG_FILE: ${{ steps.changelog.outputs.path }}
           RELEASE_COMMIT: ${{ inputs.commit }}
           RELEASE_EVENT_NAME: ${{ inputs.event_name }}
           RELEASE_FEISHU_BOT: ${{ secrets.bot }}
@@ -164,7 +147,7 @@ jobs:
           RELEASE_WIN_X64_URL: ${{ inputs.win_x64_url }}
           RELEASE_TRIGGERING_ACTOR: ${{ inputs.triggering_actor }}
           RELEASE_WORKFLOW_NAME: ${{ inputs.workflow_name }}
-        run: node --experimental-strip-types tools/release/src/notifications/feishu.ts
+        run: node --experimental-strip-types .github/scripts/release_notification.ts
 
       - name: Warn when Feishu delivery fails
         if: steps.post.outcome == 'failure'

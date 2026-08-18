@@ -1,3 +1,4 @@
+// HTTP-backed GitHub enrichment for workflow notifications.
 type GitHubJobStep = {
   conclusion?: unknown;
   name?: unknown;
@@ -22,6 +23,12 @@ export type ReleaseRunContext = {
     number: number;
     url: string;
   } | null;
+};
+
+type GitHubCompareCommit = {
+  commit?: { message?: unknown };
+  parents?: unknown;
+  sha?: unknown;
 };
 
 const FAILED_CONCLUSIONS = new Set([
@@ -52,6 +59,36 @@ function githubHeaders(token: string): Record<string, string> {
     "user-agent": "open-design-release-notifier",
     "x-github-api-version": "2022-11-28",
   };
+}
+
+export async function loadReleaseChangelog(input: {
+  commit: string;
+  fetchImpl?: typeof fetch;
+  previousCommit: string;
+  repository: string;
+  token: string;
+}): Promise<string[]> {
+  if (
+    input.repository.length === 0
+    || input.previousCommit.length === 0
+    || input.commit.length === 0
+    || input.token.length === 0
+  ) return [];
+  const response = await (input.fetchImpl ?? fetch)(
+    `https://api.github.com/repos/${input.repository}/compare/${encodeURIComponent(input.previousCommit)}...${encodeURIComponent(input.commit)}?per_page=25`,
+    { headers: githubHeaders(input.token) },
+  );
+  if (!response.ok) throw new Error(`GitHub compare HTTP ${response.status}`);
+  const payload = await response.json() as { commits?: unknown };
+  if (!Array.isArray(payload.commits)) throw new Error("GitHub compare response is invalid");
+  return (payload.commits as GitHubCompareCommit[])
+    .filter((entry) => !Array.isArray(entry.parents) || entry.parents.length <= 1)
+    .reverse()
+    .flatMap((entry) => {
+      const sha = text(entry.sha);
+      const subject = text(entry.commit?.message).split("\n", 1)[0]?.trim() ?? "";
+      return sha.length > 0 && subject.length > 0 ? [`${subject} (${sha})`] : [];
+    });
 }
 
 export async function loadReleaseRunContext(input: {

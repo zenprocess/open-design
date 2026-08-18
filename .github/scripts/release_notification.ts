@@ -1,17 +1,17 @@
 import { appendFileSync } from "node:fs";
 
-import { decodeReleaseFeishuBot } from "./bot-codec.ts";
+import { decodeReleaseFeishuBot } from "./lib/feishu/client.ts";
 import {
   buildReleaseFeishuCard,
   loadReleaseNotificationDetails,
   type ReleaseNotificationInput,
-} from "./release-card.ts";
-import { isNotificationReleaseChannel } from "./release-channel.ts";
+  isNotificationReleaseChannel,
+} from "./lib/feishu/release.ts";
 import {
   createFeishuSignedEnvelope,
   optionalEnv,
   postFeishuWebhook,
-} from "./feishu-client.ts";
+} from "./lib/feishu/client.ts";
 
 function summary(line: string): void {
   const path = optionalEnv("GITHUB_STEP_SUMMARY");
@@ -31,7 +31,6 @@ if (bot == null) {
     actor: optionalEnv("RELEASE_ACTOR"),
     branch: optionalEnv("RELEASE_BRANCH"),
     channel,
-    changelogFile: optionalEnv("RELEASE_CHANGELOG_FILE"),
     commit: optionalEnv("RELEASE_COMMIT"),
     eventName: optionalEnv("RELEASE_EVENT_NAME"),
     macArm64Smoke: optionalEnv("RELEASE_MAC_ARM64_SMOKE"),

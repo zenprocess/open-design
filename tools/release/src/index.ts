@@ -350,12 +350,6 @@ cli
     await import("./report/write-reuse-plan.ts");
   });
 
-cli
-  .command("notify feishu", "Send a Feishu release notification")
-  .action(async () => {
-    await import("./notifications/feishu.ts");
-  });
-
 cli.help();
 cli.parse(process.argv, { run: false });
 await cli.runMatchedCommand();

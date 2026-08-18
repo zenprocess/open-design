@@ -154,7 +154,7 @@ jobs:
 
             待 v${{ steps.ver.outputs.minor_base }} promote 到 stable 后，可手动重新触发本工作流（或用 `force` 强制切分支）。
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node --experimental-strip-types tools/release/src/notifications/feishu-notice.ts
+        run: node --experimental-strip-types .github/scripts/release_notice.ts
 
       - name: Stop here when skipping
         if: steps.guard.outputs.published != 'true'
@@ -224,4 +224,4 @@ jobs:
 
             Prerelease 打包已开始(约 20–40 分钟);完成后会再发一张带各平台下载链接的卡片。
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node --experimental-strip-types tools/release/src/notifications/feishu-notice.ts
+        run: node --experimental-strip-types .github/scripts/release_notice.ts

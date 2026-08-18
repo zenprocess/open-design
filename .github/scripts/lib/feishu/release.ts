@@ -1,22 +1,32 @@
-import { readFileSync } from "node:fs";
-
-import type { FeishuCard } from "./feishu-client.ts";
-import { releaseChannelDisplayLabel } from "./release-channel.ts";
+import type { FeishuCard } from "./client.ts";
 import {
   loadReleaseRunContext,
   loadReleaseRunFailures,
+  loadReleaseChangelog,
   type ReleaseRunContext,
   type ReleaseRunFailure,
-} from "./run-diagnostics.ts";
+} from "../http.ts";
 
 type JsonRecord = Record<string, unknown>;
 type FeishuElement = Record<string, unknown>;
+const EXACT_RELEASE_NAME_PATTERN = /^[a-z0-9]{1,12}$/;
+
+export function isNotificationReleaseChannel(value: unknown): value is string {
+  return typeof value === "string"
+    && (value === "stable" || value === "prerelease" || EXACT_RELEASE_NAME_PATTERN.test(value));
+}
+
+function releaseChannelDisplayLabel(channel: string): string {
+  if (channel === "stable") return "Stable";
+  if (channel === "prerelease") return "Prerelease";
+  if (!EXACT_RELEASE_NAME_PATTERN.test(channel)) throw new Error(`unsupported release notification channel: ${channel}`);
+  return channel[0]!.toUpperCase() + channel.slice(1);
+}
 
 export type ReleaseNotificationInput = {
   actor: string;
   branch: string;
   channel: string;
-  changelogFile: string;
   commit: string;
   eventName: string;
   macArm64Smoke: string;
@@ -55,6 +65,7 @@ type ColdStartDetail = {
 };
 
 export type ReleaseNotificationDetails = {
+  changelog: string[];
   coldStarts: ColdStartDetail[];
   execution: ReleaseRunContext | null;
   failures: ReleaseRunFailure[];
@@ -67,15 +78,6 @@ function record(value: unknown): JsonRecord | null {
 
 function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
-function readChangelog(path: string): string[] {
-  if (path.length === 0) return [];
-  try {
-    return readFileSync(path, "utf8").split("\n").map((line) => line.trim()).filter(Boolean);
-  } catch {
-    return [];
-  }
 }
 
 function escapeMarkdown(value: string): string {
@@ -153,19 +155,29 @@ export async function loadReleaseNotificationDetails(
   const state = notificationState(input);
   const smokeFailed = [input.macArm64Smoke, input.macX64Smoke, input.winX64Smoke].includes("failure");
   let execution: ReleaseRunContext | null = null;
+  let changelog: string[] = [];
   try {
-    execution = await loadReleaseRunContext({
-      fetchImpl,
-      repository: input.repository,
-      runUrl: input.runUrl,
-      token: githubToken,
-    });
+    [execution, changelog] = await Promise.all([
+      loadReleaseRunContext({
+        fetchImpl,
+        repository: input.repository,
+        runUrl: input.runUrl,
+        token: githubToken,
+      }),
+      loadReleaseChangelog({
+        commit: input.commit,
+        fetchImpl,
+        previousCommit: input.previousCommit,
+        repository: input.repository,
+        token: githubToken,
+      }),
+    ]);
   } catch {
     // Execution metadata is presentational. A GitHub API outage must not turn a
     // successful release card into a warning or change the release outcome.
   }
   if (!["failed", "partial"].includes(state) && !smokeFailed) {
-    return { coldStarts: [], execution, failures: [], warnings: [] };
+    return { changelog, coldStarts: [], execution, failures: [], warnings: [] };
   }
   const warnings: string[] = [];
   let coldStarts: ColdStartDetail[] = [];
@@ -179,7 +191,8 @@ export async function loadReleaseNotificationDetails(
       coldStarts = coldStartFromMetadata(metadata);
       if (input.channel !== "stable" && input.channel !== "prerelease") {
         await Promise.all(coldStarts.map(async (entry) => {
-          entry.timing = await acceptanceTiming(input.metadataUrl, entry.target, fetchImpl);
+          const timing = await acceptanceTiming(input.metadataUrl, entry.target, fetchImpl);
+          if (timing != null) entry.timing = timing;
         }));
       }
     } catch (error) {
@@ -198,7 +211,7 @@ export async function loadReleaseNotificationDetails(
       warnings.push(`未能读取失败步骤：${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return { coldStarts, execution, failures, warnings };
+  return { changelog, coldStarts, execution, failures, warnings };
 }
 
 function bytes(value: number): string {
@@ -383,19 +396,18 @@ export function buildReleaseFeishuCard(
     },
   });
   if (details.coldStarts.length > 0) elements.push({ tag: "div", text: { tag: "lark_md", content: `**Closure 冷启动**\n${coldStartMarkdown(details)}` } });
-  const changelog = readChangelog(input.changelogFile);
-  if (changelog.length > 0) elements.push({
+  if (details.changelog.length > 0) elements.push({
     tag: "div",
     text: {
       tag: "lark_md",
-      content: `**变更**\n${changelogMarkdown(changelog, input.repository)}`,
+      content: `**变更**\n${changelogMarkdown(details.changelog, input.repository)}`,
     },
   });
-  const downloads = [
+  const downloads = ([
     ["Mac Arm", input.macArm64Url],
     ["Mac x64", input.macX64Url],
     ["Win x64", input.winX64Url],
-  ].filter(([, url]) => url.length > 0);
+  ] satisfies Array<[string, string]>).filter(([, url]) => url.length > 0);
   if (downloads.length > 0 && state !== "failed") elements.push({
     tag: "action",
     actions: downloads.map(([label, url], index) => ({

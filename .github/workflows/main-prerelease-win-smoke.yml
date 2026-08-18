@@ -236,4 +236,4 @@ jobs:
 
             该 smoke 是独立质量信号，不阻塞 release cut 或 prerelease 打包 / 发布。
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node --experimental-strip-types tools/release/src/notifications/feishu-notice.ts
+        run: node --experimental-strip-types .github/scripts/release_notice.ts
