@@ -33,6 +33,18 @@ describe('packaged synthetic initial state', () => {
     });
   });
 
+  it('can pin manual updater scenarios away from the automatic install trigger', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'od-packaged-state-'));
+    roots.push(root);
+    const evidence = await seedPackagedOnboardingComplete(root, { allowSilentUpdates: false });
+    expect(JSON.parse(await readFile(evidence.path, 'utf8'))).toEqual({
+      agentId: 'codex',
+      allowSilentUpdates: false,
+      mode: 'daemon',
+      onboardingCompleted: true,
+    });
+  });
+
   it('isolates local execution from a host AMR login without inventing auth', async () => {
     const root = await mkdtemp(join(tmpdir(), 'od-packaged-amr-isolated-'));
     roots.push(root);

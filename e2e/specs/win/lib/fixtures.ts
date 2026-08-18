@@ -38,7 +38,7 @@ import { closureBlobRoots,closureBuildJsonPath,closureDistributionManifestPath,n
 import { waitForHealthyDesktop } from './runtime.js';
 import { measureSmokeStep } from './timing.js';
 
-export async function seedPackagedOnboardingComplete(): Promise<void> {
+export async function seedPackagedOnboardingComplete(options: { allowSilentUpdates?: boolean } = {}): Promise<void> {
   // Pre-mark first-run onboarding as complete so the packaged app boots
   // straight to the home shell. Since #4389 the Connect onboarding step is
   // required and has no Skip affordance, so the only way past it on a fresh
@@ -55,7 +55,7 @@ export async function seedPackagedOnboardingComplete(): Promise<void> {
   // the seed elsewhere (the AppData fallback), so the daemon never saw it and
   // the app stuck on onboarding once the Skip button was removed. This mirrors
   // the macOS smoke's seed, which already writes under runtimeNamespaceRoot.
-  await seedSyntheticOnboardingComplete(join(runtimeNamespaceRoot, 'data'));
+  await seedSyntheticOnboardingComplete(join(runtimeNamespaceRoot, 'data'), options);
 }
 
 export async function seedNativePackagedOnboardingComplete(): Promise<void> {

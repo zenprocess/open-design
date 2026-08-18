@@ -52,7 +52,7 @@ macShellDescribe('packaged mac Shell rollback recovery', () => {
       await resetPackagedRuntimeState();
       const install = await runToolsPackJson<MacInstallResult>('install');
       cleanupInstalled = true;
-      await seedPackagedOnboardingComplete();
+      await seedPackagedOnboardingComplete({ allowSilentUpdates: false });
       await seedConfiguredPackagedClosure();
 
       corruptFixture = await startToolsServeUpdaterFixture({

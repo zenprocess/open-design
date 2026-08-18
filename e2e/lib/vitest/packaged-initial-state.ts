@@ -9,6 +9,10 @@ export type PackagedSyntheticStateEvidence = Readonly<{
   state: 'synthetic-completed-local-state';
 }>;
 
+export type PackagedSyntheticStateOptions = Readonly<{
+  allowSilentUpdates?: boolean;
+}>;
+
 export type PackagedSyntheticIdentity = Readonly<{
   boundary: 'auth';
   doesNotProve: readonly ['real AMR authentication'];
@@ -49,10 +53,12 @@ export async function installPackagedIsolatedAmrState(
 /** Prepare a deterministic post-onboarding local-agent projection, not auth. */
 export async function seedPackagedOnboardingComplete(
   dataRoot: string,
+  options: PackagedSyntheticStateOptions = {},
 ): Promise<PackagedSyntheticStateEvidence> {
   const path = join(dataRoot, 'app-config.json');
   const payload = {
     agentId: 'codex',
+    ...(options.allowSilentUpdates === undefined ? {} : { allowSilentUpdates: options.allowSilentUpdates }),
     mode: 'daemon',
     onboardingCompleted: true,
   };

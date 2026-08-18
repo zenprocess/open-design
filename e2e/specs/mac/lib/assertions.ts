@@ -282,8 +282,8 @@ export async function fileSizeBytes(filePath: string): Promise<number> {
   return (await stat(filePath)).size;
 }
 
-export async function seedPackagedOnboardingComplete(): Promise<void> {
-  await seedSyntheticOnboardingComplete(join(runtimeNamespaceRoot, 'data'));
+export async function seedPackagedOnboardingComplete(options: { allowSilentUpdates?: boolean } = {}): Promise<void> {
+  await seedSyntheticOnboardingComplete(join(runtimeNamespaceRoot, 'data'), options);
 }
 
 /**

@@ -43,7 +43,7 @@ winDescribe("packaged windows rollback recovery", () => {
       await resetPackagedUpdaterNamespaceRoots();
       const install = await runToolsPackJson<WinInstallResult>('install');
       cleanupInstalled = true;
-      await seedPackagedOnboardingComplete();
+      await seedPackagedOnboardingComplete({ allowSilentUpdates: false });
       await seedConfiguredPackagedClosure();
 
       const sevenZipExe = join(install.installDir, 'resources', 'open-design', 'bin', '7z.exe');
