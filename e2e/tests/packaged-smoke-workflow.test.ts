@@ -3000,6 +3000,8 @@ process.stdin.on("end", () => {
     expect(workflow).toContain("needs.metadata.outputs.hot_staged != 'true'");
     expect(workflow).toContain("needs.metadata.outputs.hot_activated != 'true'");
     expect(workflow.match(/uses: \.\/\.github\/actions\/release\/exact\/stage/gu)).toHaveLength(2);
+    expect(workflow).toContain("commit: ${{ env.BUILT_SHA }}\n          exact-name: ${{ inputs.exact_name }}");
+    expect(workflow).toContain("commit: ${{ needs.metadata.outputs.commit }}\n          exact-name: ${{ inputs.exact_name }}");
     expect(workflow).toContain("uses: ./.github/actions/release/public-acceptance/plan");
     expect(workflow).toContain("uses: ./.github/actions/release/public-acceptance/activate");
     expect(acceptanceWorkflow).toContain("uses: ./.github/actions/release/public-acceptance/plan");

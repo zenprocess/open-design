@@ -574,6 +574,7 @@ jobs:
           RELEASE_VERSION_LOCK_REQUIRED: "true"
           STATE_SOURCE: ${{ steps.reservation.outputs.state_source || steps.exact.outputs.state_source }}
         with:
+          commit: ${{ env.BUILT_SHA }}
           exact-name: ${{ inputs.exact_name }}
           release-version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
 
@@ -946,6 +947,7 @@ jobs:
         id: staged
         uses: ./.github/actions/release/exact/stage
         with:
+          commit: ${{ needs.metadata.outputs.commit }}
           exact-name: ${{ inputs.exact_name }}
           release-version: ${{ needs.metadata.outputs.release_version }}
         env:

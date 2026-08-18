@@ -2,6 +2,8 @@ name: Stage exact release metadata
 description: Merge one Closure graph, publish immutable metadata, and stage its run-scoped acceptance feed
 
 inputs:
+  commit:
+    required: true
   exact-name:
     required: true
   release-version:
@@ -43,6 +45,8 @@ runs:
     - name: Distribute staged exact metadata
       id: distribute
       uses: ./.github/actions/release/publish-metadata
+      env:
+        RELEASE_COMMIT: ${{ inputs.commit }}
       with:
         enable_mac_arm64: true
         enable_mac_x64: true
