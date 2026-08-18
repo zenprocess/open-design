@@ -50,9 +50,12 @@ runs:
     - name: Read back activated exact public feed
       shell: bash
       env:
+        RELEASE_CHANNEL: ${{ inputs.channel }}
         RELEASE_LATEST_METADATA_URL: ${{ inputs.public-origin }}/${{ inputs.channel }}/latest/metadata.json
         RELEASE_METADATA_URL: ${{ inputs.metadata-url }}
         RELEASE_PUBLIC_FEED_REPORT_PATH: ${{ runner.temp }}/release-activation/public-feed-observation.json
+        RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
       run: pnpm exec tools-release observe-public-feed
 
     - name: Publish activation summary
