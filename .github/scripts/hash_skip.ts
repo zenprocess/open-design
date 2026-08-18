@@ -86,9 +86,10 @@ function resolveKey(root: string, key: string, ref: string, mode = "normal"): Re
   const control = gitPathSetDigest(root, commit, CONTROL_PATHS.map((path) => ({ path })), { domain: "open-design/hash-skip/control/v1", label: "hash_skip control" });
   const hash = digest(canonicalJson({ control, definition, domain: "open-design/hash-skip/v1", extras: extraDigests(definition), key, source }));
   const token = hash.slice("sha256:".length);
-  const marker = join(root, ".tmp", "hash_skip", token, "success.json");
-  mkdirSync(dirname(marker), { recursive: true });
-  writeFileSync(marker, `${JSON.stringify({ hash, key, schemaVersion: 1 })}\n`);
+  const marker = `.tmp/hash_skip/${token}/success.json`;
+  const absoluteMarker = join(root, marker);
+  mkdirSync(dirname(absoluteMarker), { recursive: true });
+  writeFileSync(absoluteMarker, `${JSON.stringify({ hash, key, schemaVersion: 1 })}\n`);
   return Object.freeze({ cacheKey: `hash-skip-v1-${key}-${token}`, hash, marker });
 }
 
@@ -115,6 +116,7 @@ function selfCheck(): void {
     execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["commit", "-qm", "one"], { cwd: root });
     process.env.HASH_SKIP_EXTRA_RUNTIME = digest("node24");
     const first = resolveKey(root, "probe", "HEAD");
+    ensure.that(first.marker.startsWith(".tmp/hash_skip/") && !isAbsolute(first.marker), "cache marker must be repository-relative and cross-runner portable");
     ensure.that(first.hash === resolveKey(root, "probe", "HEAD").hash, "same inputs produced different hashes");
     const completed = resolveKey(root, "probe", "HEAD", "complete");
     ensure.that(first.hash === completed.hash && first.cacheKey === completed.cacheKey && first.marker === completed.marker, "normal and complete modes produced asymmetric identities");

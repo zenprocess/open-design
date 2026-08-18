@@ -32,11 +32,13 @@ runs:
       if: ${{ inputs.mode != 'quarantine' && inputs.mode != 'complete' }}
       uses: actions/cache/restore@v5.0.5
       with:
+        enableCrossOsArchive: true
         key: ${{ steps.resolve.outputs.cache_key }}
         path: ${{ steps.resolve.outputs.marker }}
     - name: Register successful execution cache
       if: ${{ inputs.mode == 'complete' }}
       uses: actions/cache/save@v5.0.5
       with:
+        enableCrossOsArchive: true
         key: ${{ steps.resolve.outputs.cache_key }}
         path: ${{ steps.resolve.outputs.marker }}

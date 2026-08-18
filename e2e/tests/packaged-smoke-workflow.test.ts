@@ -530,6 +530,7 @@ describe("packaged smoke workflow", () => {
     expect(ci).toContain("node --experimental-strip-types .github/scripts/hash_skip.ts self-check");
     expect(hashSkip).toContain("uses: actions/cache/restore@v5.0.5");
     expect(hashSkip).toContain("uses: actions/cache/save@v5.0.5");
+    expect(hashSkip.match(/enableCrossOsArchive: true/gu)).toHaveLength(2);
     expect(hashSkip).toContain("inputs.mode == 'complete'");
     expect(hashSkip).not.toContain("restore-keys:");
     for (const action of [mac, win]) {
