@@ -292,6 +292,15 @@ describe("immutable Shell build storage", () => {
         expect(await readFile(reusedDmgPath, "utf8")).toBe("signed-notarized-dmg");
         expect(await readFile(reusedPayloadPath, "utf8")).toBe("signed-launcher-payload");
 
+        await Promise.all([rm(reusedDmgPath), rm(reusedPayloadPath)]);
+        process.env.RELEASE_SHELL_MATERIALIZE = "false";
+        await resolveShellBuild();
+        const recordOnly = JSON.parse(await readFile(buildPath, "utf8"));
+        expect(recordOnly.resolution.artifacts).toEqual(registered.resolution.artifacts);
+        await expect(readFile(reusedDmgPath)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(readFile(reusedPayloadPath)).rejects.toMatchObject({ code: "ENOENT" });
+        delete process.env.RELEASE_SHELL_MATERIALIZE;
+
         await writeFile(smokeSummaryPath, `${JSON.stringify({
           plan: { profile: "full", selectedLanes: ["shell", "standalone", "migration"] },
           schemaVersion: 1,

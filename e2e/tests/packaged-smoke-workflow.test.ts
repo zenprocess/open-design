@@ -2090,7 +2090,7 @@ process.stdin.on("end", () => {
       readFile(betaWinDistributionActionPath, "utf8"),
     ]);
 
-    expect(workflow).toContain('candidate-enabled: "true"');
+    expect(workflow).toContain("candidate-enabled: ${{ !inputs.promote }}");
     expect(workflow).toContain("candidate-id: ${{ needs.metadata.outputs.candidate_id }}");
     expect(workflow).toContain('publish: "true"');
     expect(workflow).toContain('publish-enabled: "true"');
@@ -2115,7 +2115,7 @@ process.stdin.on("end", () => {
       }
     }
     expect(macCandidate).toContain("inputs.candidate-enabled == 'true'");
-    expect(winCandidate).toContain("if: ${{ inputs.phase != 'finish' && !cancelled() }}");
+    expect(winCandidate).toContain("inputs.candidate-enabled == 'true'");
     expect(workflow).toContain("  candidate:");
     expect(workflow).toContain("tools-release finalize-candidate");
     expect(workflow).toContain('RELEASE_ACTIVATE_LATEST: "false"');
@@ -2275,12 +2275,17 @@ process.stdin.on("end", () => {
     expect(metadataJob).toContain("uses: actions/github-script@v8");
     expect(metadataJob).toContain('const profileRoot = path.join(process.env.RUNNER_TEMP, "release-identity-profiles")');
     expect(metadataJob).toContain('const profile = JSON.parse(result.stdout)');
-    expect(metadataJob).toContain('core.setOutput("build_matrix", JSON.stringify(identities.buildMatrix))');
+    expect(metadataJob).toContain('core.setOutput("build_matrix", JSON.stringify({ include }))');
+    expect(metadataJob).toContain('core.setOutput("build_count", String(include.length))');
+    expect(metadataJob).toContain("uses: ./.github/actions/hash-skip");
+    expect(metadataJob).toContain("uses: ./.github/actions/release/platform/project");
+    expect(metadataJob).toContain('reusable[target] ? "reuse verified registry content" : "runner execution"');
     expect(executionStep).not.toContain("jq -");
     const manualDispatch = sectionBetween(betaWorkflow, "  workflow_dispatch:", "  workflow_call:");
     expect(manualDispatch).toContain("      promote:");
     expect(manualDispatch).toContain("        default: true");
     const buildJob = sectionBetween(betaWorkflow, "  build:", "  stage:");
+    expect(buildJob).toContain("if: ${{ needs.metadata.outputs.build_count != '0' }}");
     expect(buildJob).toContain("matrix: ${{ fromJSON(needs.metadata.outputs.build_matrix) }}");
     expect(betaWorkflow).toContain("Resolve release target identities");
     expect(betaWorkflow).not.toContain("Materialize replayed platform projections");

@@ -142,7 +142,8 @@ jobs:
       release_name: ${{ steps.exact.outputs.release_name }}
       state_source: ${{ steps.reservation.outputs.state_source || steps.exact.outputs.state_source }}
       version_lock_key: ${{ steps.reservation.outputs.version_lock_key }}
-      build_matrix: ${{ steps.execution.outputs.build_matrix }}
+      build_matrix: ${{ steps.selection.outputs.build_matrix }}
+      build_count: ${{ steps.selection.outputs.build_count }}
     steps:
       - name: Validate checkout ref shape
         env:
@@ -386,11 +387,67 @@ jobs:
             }));
             await exec.exec("pnpm", ["exec", "tools-release", "resolve-release-identities", "--input", identityInputPath, "--output", identityPath]);
             const identities = JSON.parse(fs.readFileSync(identityPath, "utf8"));
-            core.setOutput("build_matrix", JSON.stringify(identities.buildMatrix));
             core.setOutput("shared_closure_digest", identities.sharedClosureIdentityDigest);
-            await core.summary.addHeading("Release target identities", 3).addTable([
-              [{ data: "Target", header: true }, { data: "Execution", header: true }],
-              ...identities.buildMatrix.include.map(({ target }) => [target, "enter (domain caches + hash_skip)"]),
+            for (const identity of identities.buildMatrix.include) {
+              core.setOutput(`${identity.target}_closure_digest`, identity.closure_identity_digest);
+              core.setOutput(`${identity.target}_shell_digest`, identity.shell_identity_digest);
+            }
+
+      - name: Probe mac_arm64 content proof
+        id: mac_arm64_proof
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ steps.execution.outputs.mac_arm64_closure_digest }}
+          HASH_SKIP_EXTRA_SHELL: ${{ steps.execution.outputs.mac_arm64_shell_digest }}
+        with:
+          hash_skip: release.smoke.mac
+
+      - name: Probe mac_x64 content proof
+        id: mac_x64_proof
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ steps.execution.outputs.mac_x64_closure_digest }}
+          HASH_SKIP_EXTRA_SHELL: ${{ steps.execution.outputs.mac_x64_shell_digest }}
+        with:
+          hash_skip: release.smoke.mac
+
+      - name: Probe win_x64 content proof
+        id: win_x64_proof
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ steps.execution.outputs.win_x64_closure_digest }}
+          HASH_SKIP_EXTRA_SHELL: ${{ steps.execution.outputs.win_x64_shell_digest }}
+        with:
+          hash_skip: release.smoke.win
+
+      - name: Select content execution topology
+        id: selection
+        uses: actions/github-script@v8
+        env:
+          MAC_ARM64_REUSE: ${{ steps.mac_arm64_proof.outputs.skip }}
+          MAC_X64_REUSE: ${{ steps.mac_x64_proof.outputs.skip }}
+          PROMOTE: ${{ inputs.promote }}
+          WIN_X64_REUSE: ${{ steps.win_x64_proof.outputs.skip }}
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const identities = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, "release-identities", "resolved.json"), "utf8"));
+            const reusable = {
+              mac_arm64: process.env.PROMOTE === "true" && process.env.MAC_ARM64_REUSE === "true",
+              mac_x64: process.env.PROMOTE === "true" && process.env.MAC_X64_REUSE === "true",
+              win_x64: process.env.PROMOTE === "true" && process.env.WIN_X64_REUSE === "true",
+            };
+            const include = identities.buildMatrix.include.filter(({ target }) => !reusable[target]);
+            core.setOutput("build_matrix", JSON.stringify({ include }));
+            core.setOutput("build_count", String(include.length));
+            await core.summary.addHeading("Release content topology", 3).addTable([
+              [{ data: "Target", header: true }, { data: "Content", header: true }, { data: "Version projection", header: true }],
+              ...identities.buildMatrix.include.map(({ target }) => [
+                target,
+                reusable[target] ? "reuse verified registry content" : "runner execution",
+                reusable[target] ? "metadata job" : "platform job",
+              ]),
             ]).write();
 
       - name: Materialize canonical shared Standalone Closure
@@ -412,9 +469,64 @@ jobs:
           publish-enabled: "true"
           release-version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
 
+      - name: Project verified mac_arm64 content
+        if: ${{ steps.mac_arm64_proof.outputs.skip == 'true' && inputs.promote }}
+        uses: ./.github/actions/release/platform/project
+        env: &projection_env
+          GITHUB_SHA: ${{ env.BUILT_SHA }}
+          RELEASE_COMMIT: ${{ env.BUILT_SHA }}
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+          RELEASE_VERSION_LOCK_KEY: ${{ steps.reservation.outputs.version_lock_key }}
+          RELEASE_VERSION_LOCK_REQUIRED: "true"
+        with:
+          artifact-id: mac-arm64
+          channel: ${{ inputs.exact_name }}
+          closure-identity-digest: ${{ steps.execution.outputs.mac_arm64_closure_digest }}
+          platform: darwin-arm64
+          public-origin: ${{ env.RELEASE_PUBLIC_ORIGIN }}
+          release-version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
+          shell-identity-digest: ${{ steps.execution.outputs.mac_arm64_shell_digest }}
+          shell-plan-path: ${{ runner.temp }}/release-identity-profiles/mac-arm64.json
+          target: mac_arm64
+
+      - name: Project verified mac_x64 content
+        if: ${{ steps.mac_x64_proof.outputs.skip == 'true' && inputs.promote }}
+        uses: ./.github/actions/release/platform/project
+        env: *projection_env
+        with:
+          artifact-id: mac-x64
+          channel: ${{ inputs.exact_name }}
+          closure-identity-digest: ${{ steps.execution.outputs.mac_x64_closure_digest }}
+          platform: darwin-x64
+          public-origin: ${{ env.RELEASE_PUBLIC_ORIGIN }}
+          release-version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
+          shell-identity-digest: ${{ steps.execution.outputs.mac_x64_shell_digest }}
+          shell-plan-path: ${{ runner.temp }}/release-identity-profiles/mac-x64.json
+          target: mac_x64
+
+      - name: Project verified win_x64 content
+        if: ${{ steps.win_x64_proof.outputs.skip == 'true' && inputs.promote }}
+        uses: ./.github/actions/release/platform/project
+        env: *projection_env
+        with:
+          artifact-id: win-x64
+          channel: ${{ inputs.exact_name }}
+          closure-identity-digest: ${{ steps.execution.outputs.win_x64_closure_digest }}
+          platform: win32-x64
+          public-origin: ${{ env.RELEASE_PUBLIC_ORIGIN }}
+          release-version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
+          shell-identity-digest: ${{ steps.execution.outputs.win_x64_shell_digest }}
+          shell-plan-path: ${{ runner.temp }}/release-identity-profiles/win-x64.json
+          target: win_x64
+
   build:
     name: Build exact ${{ matrix.target }}
     needs: metadata
+    if: ${{ needs.metadata.outputs.build_count != '0' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.metadata.outputs.build_matrix) }}
@@ -457,7 +569,7 @@ jobs:
           closure-identity-digest: ${{ matrix.closure_identity_digest }}
           closure-shared-identity-digest: ${{ needs.metadata.outputs.closure_shared_identity_digest }}
           closure-version: ${{ needs.metadata.outputs.closure_version }}
-          candidate-enabled: "true"
+          candidate-enabled: ${{ !inputs.promote }}
           legacy-migration-enabled: ${{ matrix.target == 'mac_arm64' && inputs.exact_name == 'beta' && 'true' || 'false' }}
           namespace: ${{ matrix.target == 'mac_arm64' && format('release-{0}', inputs.exact_name) || format('release-{0}-x64', inputs.exact_name) }}
           platform: ${{ matrix.target == 'mac_arm64' && 'darwin-arm64' || 'darwin-x64' }}
@@ -489,7 +601,7 @@ jobs:
           closure-identity-digest: ${{ matrix.closure_identity_digest }}
           closure-shared-identity-digest: ${{ needs.metadata.outputs.closure_shared_identity_digest }}
           closure-version: ${{ needs.metadata.outputs.closure_version }}
-          candidate-enabled: "true"
+          candidate-enabled: ${{ !inputs.promote }}
           legacy-migration-enabled: ${{ matrix.target == 'mac_arm64' && inputs.exact_name == 'beta' && 'true' || 'false' }}
           namespace: ${{ matrix.target == 'mac_arm64' && format('release-{0}', inputs.exact_name) || format('release-{0}-x64', inputs.exact_name) }}
           phase: finish
@@ -514,6 +626,7 @@ jobs:
         with:
           channel: ${{ inputs.exact_name }}
           candidate-id: ${{ needs.metadata.outputs.candidate_id }}
+          candidate-enabled: ${{ !inputs.promote }}
           closure-identity-digest: ${{ matrix.closure_identity_digest }}
           closure-shared-identity-digest: ${{ needs.metadata.outputs.closure_shared_identity_digest }}
           release-version: ${{ needs.metadata.outputs.release_version }}
@@ -537,6 +650,7 @@ jobs:
         with:
           channel: ${{ inputs.exact_name }}
           candidate-id: ${{ needs.metadata.outputs.candidate_id }}
+          candidate-enabled: ${{ !inputs.promote }}
           closure-identity-digest: ${{ matrix.closure_identity_digest }}
           closure-shared-identity-digest: ${{ needs.metadata.outputs.closure_shared_identity_digest }}
           release-version: ${{ needs.metadata.outputs.release_version }}

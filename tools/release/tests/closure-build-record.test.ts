@@ -28,6 +28,7 @@ const releaseEnv = [
   "RELEASE_CLOSURE_BUILD_KIND",
   "RELEASE_CLOSURE_BUILD_TOKEN",
   "RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH",
+  "RELEASE_CLOSURE_MATERIALIZE",
   "RELEASE_PUBLIC_ORIGIN",
   "RELEASE_STORAGE_ACCESS_KEY_ID",
   "RELEASE_STORAGE_BUCKET",
@@ -160,6 +161,11 @@ describe("immutable Closure build record", () => {
       expect(await readFile(join(resolvedBlobRoot, launcherDigest.slice(7)))).toEqual(launcherBytes);
       expect(JSON.parse(await readFile(resolvedContributionPath, "utf8")).version).toBe("0.19.4-beta.2");
       expect(await readFile(join(root, "github-output.txt"), "utf8")).not.toContain("state=miss");
+
+      process.env.RELEASE_CLOSURE_MATERIALIZE = "false";
+      await resolveClosureBuild();
+      expect(JSON.parse(await readFile(resolvedContributionPath, "utf8")).version).toBe("0.19.4-beta.3");
+      expect(await readFile(join(resolvedBlobRoot, launcherDigest.slice(7)))).toEqual(launcherBytes);
     } finally {
       await rm(root, { force: true, recursive: true });
     }

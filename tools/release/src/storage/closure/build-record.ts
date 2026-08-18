@@ -12,7 +12,7 @@ import {
 } from "@open-design/closure/protocol";
 import { releaseChannelDescriptor, releaseClosureBlobObjectKey, type ReleaseChannel } from "@open-design/release";
 
-import { githubInfo, publicUrl, required, storageConfigFromEnv, writeJson } from "../common.ts";
+import { githubInfo, optional, publicUrl, required, storageConfigFromEnv, writeJson } from "../common.ts";
 import { getStorageObject, putStorageObjectWithStatus, type StorageConfig } from "../s3-upload.ts";
 
 type Digest = `sha256:${string}`;
@@ -166,6 +166,7 @@ export async function resolveClosureBuild(): Promise<void> {
   const token = required("RELEASE_CLOSURE_BUILD_TOKEN");
   const prefix = closureBuildPrefix(channel, token, identityDigest);
   const storage = storageConfigFromEnv();
+  const materialize = optional("RELEASE_CLOSURE_MATERIALIZE", "true") !== "false";
   const object = await getStorageObject({ ...storage, objectKey: `${prefix}/record.json` });
   if (object == null) {
     githubOutput("state", "miss");
@@ -181,28 +182,32 @@ export async function resolveClosureBuild(): Promise<void> {
     return;
   }
   const blobRoot = required("RELEASE_CLOSURE_BLOB_ROOT");
-  await mkdir(dirname(blobRoot), { recursive: true });
-  const pendingRoot = await mkdtemp(`${blobRoot}.pending-`);
+  if (materialize) await mkdir(dirname(blobRoot), { recursive: true });
+  const pendingRoot = materialize ? await mkdtemp(`${blobRoot}.pending-`) : null;
   try {
-    for (const artifact of record.artifacts) {
-      const remote = await getStorageObject({ ...storage, objectKey: artifact.objectKey });
-      if (remote == null || remote.bytes.byteLength !== artifact.size || digest(remote.bytes) !== artifact.digest) {
-        throw new Error(`immutable Closure build artifact is missing or corrupt: ${artifact.objectKey}`);
+    if (pendingRoot != null) {
+      for (const artifact of record.artifacts) {
+        const remote = await getStorageObject({ ...storage, objectKey: artifact.objectKey });
+        if (remote == null || remote.bytes.byteLength !== artifact.size || digest(remote.bytes) !== artifact.digest) {
+          throw new Error(`immutable Closure build artifact is missing or corrupt: ${artifact.objectKey}`);
+        }
+        await writeFile(join(pendingRoot, artifact.digest.slice("sha256:".length)), remote.bytes);
       }
-      await writeFile(join(pendingRoot, artifact.digest.slice("sha256:".length)), remote.bytes);
     }
     const contribution = rebindClosureContribution(kind, record.contribution, {
       channel,
       publicOrigin: required("RELEASE_PUBLIC_ORIGIN"),
       version: required("RELEASE_VERSION"),
     });
-    await rm(blobRoot, { force: true, recursive: true });
-    await rename(pendingRoot, blobRoot);
+    if (pendingRoot != null) {
+      await rm(blobRoot, { force: true, recursive: true });
+      await rename(pendingRoot, blobRoot);
+    }
     writeJson(required("RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH"), contribution);
     githubOutput("state", "hit");
-    console.log(`Closure build hit: ${prefix}`);
+    console.log(`Closure build hit: ${prefix} (${materialize ? "materialized" : "record only"})`);
   } finally {
-    await rm(pendingRoot, { force: true, recursive: true });
+    if (pendingRoot != null) await rm(pendingRoot, { force: true, recursive: true });
   }
 }
 

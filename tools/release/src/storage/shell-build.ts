@@ -450,6 +450,7 @@ export async function resolveShellBuild(): Promise<void> {
     : null;
   const releaseDigest = await authoritativeShellReleaseDigest(plan);
   const storage = storageConfigFromEnv();
+  const materialize = optional("RELEASE_SHELL_MATERIALIZE", "true") !== "false";
   const indexKey = shellBuildIndexObjectKey(
     channel,
     plan.shell.type,
@@ -466,18 +467,20 @@ export async function resolveShellBuild(): Promise<void> {
   }
   const record = validateShellBuildRecord(JSON.parse(object.text) as unknown, plan, channel, releaseDigest);
   requirePlannedArtifacts(plan, record.artifacts);
-  for (const [kind, artifact] of Object.entries(record.artifacts)) {
-    const targetPath = plan.artifacts[kind];
-    if (targetPath == null) continue;
-    const remote = await getStorageObject({ ...storage, objectKey: artifact.objectKey });
-    if (remote == null) {
-      throw new Error(`immutable Shell ${kind} artifact is missing: ${artifact.objectKey}`);
+  if (materialize) {
+    for (const [kind, artifact] of Object.entries(record.artifacts)) {
+      const targetPath = plan.artifacts[kind];
+      if (targetPath == null) continue;
+      const remote = await getStorageObject({ ...storage, objectKey: artifact.objectKey });
+      if (remote == null) {
+        throw new Error(`immutable Shell ${kind} artifact is missing: ${artifact.objectKey}`);
+      }
+      if (remote.bytes.byteLength !== artifact.size || sha256(remote.bytes) !== artifact.digest) {
+        throw new Error(`immutable Shell ${kind} artifact failed digest verification: ${artifact.objectKey}`);
+      }
+      mkdirSync(dirname(targetPath), { recursive: true });
+      writeFileSync(targetPath, remote.bytes);
     }
-    if (remote.bytes.byteLength !== artifact.size || sha256(remote.bytes) !== artifact.digest) {
-      throw new Error(`immutable Shell ${kind} artifact failed digest verification: ${artifact.objectKey}`);
-    }
-    mkdirSync(dirname(targetPath), { recursive: true });
-    writeFileSync(targetPath, remote.bytes);
   }
   let smokeProof: {
     specDigest: Digest;
@@ -536,7 +539,7 @@ export async function resolveShellBuild(): Promise<void> {
   );
   writeGithubOutput("state", "hit");
   writeGithubOutput("shell_version", record.shell.version);
-  console.log(`Shell build hit: ${indexKey} (${record.shell.version})`);
+  console.log(`Shell build hit: ${indexKey} (${record.shell.version}, ${materialize ? "materialized" : "record only"})`);
 }
 
 export async function registerShellSmokeProof(): Promise<void> {

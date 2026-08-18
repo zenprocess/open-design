@@ -7,9 +7,9 @@ import {
   CLOSURE_DISTRIBUTION_CONTRIBUTION_SCHEMA_VERSION,
   CLOSURE_PROTOCOL_VERSION,
 } from "@open-design/closure/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createClosureContributionPublicationPlan } from "../src/storage/publish-closure-contribution.js";
+import { createClosureContributionPublicationPlan, publishClosureContribution } from "../src/storage/publish-closure-contribution.js";
 
 const roots: string[] = [];
 
@@ -55,6 +55,24 @@ async function fixture() {
 }
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
+  for (const name of [
+    "RELEASE_CHANNEL",
+    "RELEASE_CLOSURE_BLOB_ROOT",
+    "RELEASE_CLOSURE_BUILD_DIGEST",
+    "RELEASE_CLOSURE_BUILD_KIND",
+    "RELEASE_CLOSURE_BUILD_TOKEN",
+    "RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH",
+    "RELEASE_CLOSURE_CONTRIBUTION_KIND",
+    "RELEASE_CLOSURE_REMOTE_PROJECTION",
+    "RELEASE_PUBLIC_ORIGIN",
+    "RELEASE_STORAGE_ACCESS_KEY_ID",
+    "RELEASE_STORAGE_BUCKET",
+    "RELEASE_STORAGE_ENDPOINT",
+    "RELEASE_STORAGE_REGION",
+    "RELEASE_STORAGE_SECRET_ACCESS_KEY",
+    "RELEASE_VERSION",
+  ]) delete process.env[name];
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { force: true, recursive: true })));
 });
 
@@ -147,5 +165,67 @@ describe("Closure contribution publication boundary", () => {
       publicOrigin: "https://releases.open-design.test",
       version: "0.19.0-beta.9",
     })).toThrow(/blob URL/u);
+  });
+
+  it("projects a rebound contribution directly from its immutable build record", async () => {
+    const value = await fixture();
+    const root = roots.at(-1)!;
+    const identityDigest = digest("shared identity");
+    const contributionPath = join(root, "projected-contribution.json");
+    await writeFile(contributionPath, `${JSON.stringify(value.contribution)}\n`);
+    const buildPrefix = `beta/closure/builds/shared/${identityDigest.slice("sha256:".length)}`;
+    const record = {
+      artifacts: [value.contribution.launcher.artifact, value.contribution.body.artifact].map((artifact) => ({
+        ...artifact,
+        objectKey: `${buildPrefix}/blobs/${artifact.digest.slice("sha256:".length)}`,
+      })),
+      channel: "beta",
+      contribution: value.contribution,
+      createdAt: new Date().toISOString(),
+      identityDigest,
+      kind: "shared",
+      provenance: {},
+      schemaVersion: 1,
+    };
+    const copies: Array<{ source: string; target: string }> = [];
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      const key = url.pathname.replace(/^\/releases\//u, "");
+      if (init?.method === "PUT") {
+        const headers = new Headers(init.headers);
+        copies.push({ source: headers.get("x-amz-copy-source") ?? "", target: key });
+        return new Response("", { status: 200 });
+      }
+      if (key === `${buildPrefix}/record.json`) {
+        return new Response(JSON.stringify(record), { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+    Object.assign(process.env, {
+      RELEASE_CHANNEL: "beta",
+      RELEASE_CLOSURE_BLOB_ROOT: join(root, "unused"),
+      RELEASE_CLOSURE_BUILD_DIGEST: identityDigest,
+      RELEASE_CLOSURE_BUILD_KIND: "shared",
+      RELEASE_CLOSURE_BUILD_TOKEN: "shared",
+      RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: contributionPath,
+      RELEASE_CLOSURE_CONTRIBUTION_KIND: "shared",
+      RELEASE_CLOSURE_REMOTE_PROJECTION: "true",
+      RELEASE_PUBLIC_ORIGIN: "https://releases.open-design.test",
+      RELEASE_STORAGE_ACCESS_KEY_ID: "test-key",
+      RELEASE_STORAGE_BUCKET: "releases",
+      RELEASE_STORAGE_ENDPOINT: "https://storage.example",
+      RELEASE_STORAGE_REGION: "auto",
+      RELEASE_STORAGE_SECRET_ACCESS_KEY: "test-secret",
+      RELEASE_VERSION: "0.19.0-beta.9",
+    });
+
+    await publishClosureContribution();
+
+    expect(copies).toHaveLength(2);
+    expect(copies.map(({ target }) => target)).toEqual([
+      `beta/versions/0.19.0-beta.9/closure/blobs/${value.launcher.slice("sha256:".length)}`,
+      `beta/versions/0.19.0-beta.9/closure/blobs/${value.body.slice("sha256:".length)}`,
+    ]);
+    expect(copies.every(({ source }) => source.startsWith("/releases/beta/closure/builds/shared/"))).toBe(true);
   });
 });

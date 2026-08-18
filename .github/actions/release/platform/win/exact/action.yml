@@ -5,6 +5,10 @@ inputs:
   candidate-id:
     description: Immutable release candidate build-spec digest
     required: true
+  candidate-enabled:
+    description: Publish an unlisted candidate projection when promotion is disabled
+    required: false
+    default: "false"
   channel:
     description: Validated exact release name
     required: true
@@ -251,7 +255,7 @@ runs:
       # output rather than a hardcoded layout, so whichever of installerPath /
       # portableZipPath the selected win_x64_target actually produced is what
       # gets uploaded under the immutable candidate prefix.
-      if: ${{ inputs.phase != 'finish' && !cancelled() }}
+      if: ${{ inputs.phase != 'finish' && !cancelled() && inputs.candidate-enabled == 'true' }}
       env:
         RELEASE_CANDIDATE_BUILD_JSON_KEYS: installerPath,portableZipPath
         RELEASE_CANDIDATE_BUILD_JSON_PATH: ${{ runner.temp }}\release-build\win_x64\build.json

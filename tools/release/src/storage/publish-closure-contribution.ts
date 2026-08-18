@@ -14,8 +14,9 @@ import {
   type ReleaseChannel,
 } from "@open-design/release";
 
+import { closureBuildPrefix, validateClosureBuildRecord } from "./closure/build-record.ts";
 import { normalizePublicUrl, optional, publicUrl, required, storageConfigFromEnv, writeJson } from "./common.ts";
-import { getStorageObject, putStorageObjectWithStatus, type StorageConfig } from "./s3-upload.ts";
+import { copyStorageObject, getStorageObject, putStorageObjectWithStatus, type StorageConfig } from "./s3-upload.ts";
 import { assertCurrentVersionReservation, versionLockObjectKey } from "./counted-version-reservation.ts";
 
 type Digest = `sha256:${string}`;
@@ -148,20 +149,67 @@ export async function publishClosureContribution(): Promise<void> {
     throw new Error("RELEASE_CLOSURE_CONTRIBUTION_KIND must be shared or target");
   }
   const contributionPath = required("RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH");
-  const plan = createClosureContributionPublicationPlan({
-    blobRoot: required("RELEASE_CLOSURE_BLOB_ROOT"),
-    channel,
-    contribution: JSON.parse(readFileSync(contributionPath, "utf8")) as unknown,
-    kind,
-    publicOrigin: required("RELEASE_PUBLIC_ORIGIN"),
-    version,
-  });
+  const contribution = JSON.parse(readFileSync(contributionPath, "utf8")) as unknown;
+  const remoteProjection = optional("RELEASE_CLOSURE_REMOTE_PROJECTION", "false") === "true";
+  const publicOrigin = required("RELEASE_PUBLIC_ORIGIN");
   const storage = storageConfigFromEnv();
   if (process.env.RELEASE_VERSION_LOCK_REQUIRED === "true") {
     if (channel === "stable") throw new Error("stable releases do not use counted version reservations");
     const lockKey = optional("RELEASE_VERSION_LOCK_KEY", versionLockObjectKey(version, channel));
     await assertCurrentVersionReservation(storage, version, lockKey, channel);
   }
+  if (remoteProjection) {
+    const identityDigest = required("RELEASE_CLOSURE_BUILD_DIGEST") as Digest;
+    const token = required("RELEASE_CLOSURE_BUILD_TOKEN");
+    const recordKey = `${closureBuildPrefix(channel, token, identityDigest)}/record.json`;
+    const object = await getStorageObject({ ...storage, objectKey: recordKey });
+    if (object == null) throw new Error(`immutable Closure build record is missing: ${recordKey}`);
+    const record = validateClosureBuildRecord(JSON.parse(object.text) as unknown, {
+      channel,
+      identityDigest,
+      kind,
+      token,
+    });
+    const parsed = contributionArtifacts(kind, contribution);
+    if (parsed.channel !== channel || parsed.version !== version) {
+      throw new Error(`Closure ${kind} contribution identity ${parsed.channel}/${parsed.version} does not match ${channel}/${version}`);
+    }
+    const sources = new Map(record.artifacts.map((artifact) => [artifact.digest, artifact]));
+    const published = [];
+    for (const artifact of parsed.artifacts) {
+      const source = sources.get(artifact.digest);
+      if (source == null || source.size !== artifact.size || source.mediaType !== artifact.mediaType) {
+        throw new Error(`Closure build record does not bind projected blob ${artifact.digest}`);
+      }
+      const objectKey = releaseClosureBlobObjectKey(channel, version, artifact.digest);
+      const url = expectedBlobUrl(publicOrigin, channel, version, artifact.digest);
+      if (normalizePublicUrl(artifact.url) !== url) {
+        throw new Error(`Closure contribution blob URL must be ${url}; got ${artifact.url}`);
+      }
+      await copyStorageObject({
+        ...storage,
+        cacheControl: "public, max-age=31536000, immutable",
+        contentType: artifact.mediaType,
+        objectKey,
+        sourceObjectKey: source.objectKey,
+      });
+      published.push({ digest: artifact.digest, objectKey, state: "projected", url });
+    }
+    const outputPath = process.env.RELEASE_CLOSURE_PUBLICATION_JSON_PATH;
+    if (outputPath != null && outputPath.length > 0) {
+      writeJson(outputPath, { channel, kind, published, schemaVersion: 1, version });
+    }
+    console.log(`projected ${published.length} immutable Closure ${kind} blob(s) for ${channel}/${version}`);
+    return;
+  }
+  const plan = createClosureContributionPublicationPlan({
+    blobRoot: required("RELEASE_CLOSURE_BLOB_ROOT"),
+    channel,
+    contribution,
+    kind,
+    publicOrigin,
+    version,
+  });
   const published = [];
   for (const blob of plan.blobs) {
     published.push({

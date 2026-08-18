@@ -38,6 +38,7 @@ runs:
         RELEASE_CLOSURE_BUILD_KIND: shared
         RELEASE_CLOSURE_BUILD_TOKEN: shared
         RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-build/closure-shared/shared-contribution.json
+        RELEASE_CLOSURE_MATERIALIZE: "false"
         RELEASE_VERSION: ${{ inputs.release-version }}
       run: pnpm exec tools-release resolve-closure-build
 
@@ -81,6 +82,10 @@ runs:
         RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-build/closure-shared/shared-contribution.json
         RELEASE_CLOSURE_CONTRIBUTION_KIND: shared
         RELEASE_CLOSURE_PUBLICATION_JSON_PATH: ${{ runner.temp }}/release-build/closure-shared/publication.json
+        RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.identity-digest }}
+        RELEASE_CLOSURE_BUILD_KIND: shared
+        RELEASE_CLOSURE_BUILD_TOKEN: shared
+        RELEASE_CLOSURE_REMOTE_PROJECTION: ${{ steps.closure_resolution.outputs.state == 'hit' }}
         RELEASE_VERSION: ${{ inputs.release-version }}
       run: pnpm exec tools-release publish-closure-contribution
 
@@ -90,6 +95,5 @@ runs:
         name: open-design-${{ inputs.channel }}-closure-shared
         path: |
           ${{ runner.temp }}/release-build/closure-shared/shared-contribution.json
-          ${{ runner.temp }}/release-build/closure-shared/blobs
         if-no-files-found: error
         retention-days: 1

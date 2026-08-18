@@ -1,0 +1,147 @@
+name: Project verified release target
+description: Project immutable Shell and Closure registry content into one exact release version
+
+inputs:
+  artifact-id:
+    required: true
+  channel:
+    required: true
+  closure-identity-digest:
+    required: true
+  platform:
+    description: darwin-arm64, darwin-x64, or win32-x64
+    required: true
+  release-version:
+    required: true
+  public-origin:
+    required: true
+  shell-identity-digest:
+    required: true
+  shell-plan-path:
+    required: true
+  target:
+    description: mac_arm64, mac_x64, or win_x64
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve immutable ${{ inputs.target }} Closure record
+      id: closure
+      shell: bash
+      env:
+        RELEASE_CHANNEL: ${{ inputs.channel }}
+        RELEASE_CLOSURE_BLOB_ROOT: ${{ runner.temp }}/release-projection/${{ inputs.target }}/closure-blobs
+        RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.closure-identity-digest }}
+        RELEASE_CLOSURE_BUILD_KIND: target
+        RELEASE_CLOSURE_BUILD_TOKEN: target-${{ inputs.platform }}
+        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/target-contribution.json
+        RELEASE_CLOSURE_MATERIALIZE: "false"
+        RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+      run: pnpm exec tools-release resolve-closure-build
+
+    - name: Require reusable ${{ inputs.target }} Closure
+      if: ${{ steps.closure.outputs.state != 'hit' }}
+      shell: bash
+      run: |
+        echo "hash_skip completed without an immutable ${{ inputs.target }} Closure build" >&2
+        exit 1
+
+    - name: Resolve immutable ${{ inputs.target }} Shell record
+      id: shell
+      shell: bash
+      env:
+        RELEASE_CHANNEL: ${{ inputs.channel }}
+        RELEASE_CONTENT_IDENTITY_DIGEST: ${{ inputs.shell-identity-digest }}
+        RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+        RELEASE_SHELL_BUILD_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/shell-build.json
+        RELEASE_SHELL_MATERIALIZE: "false"
+        RELEASE_SHELL_PLAN_JSON_PATH: ${{ inputs.shell-plan-path }}
+      run: pnpm exec tools-release resolve-shell-build
+
+    - name: Require reusable ${{ inputs.target }} Shell
+      if: ${{ steps.shell.outputs.state != 'hit' }}
+      shell: bash
+      run: |
+        echo "hash_skip completed without an immutable ${{ inputs.target }} Shell build" >&2
+        exit 1
+
+    - name: Project versioned ${{ inputs.target }} Closure blobs
+      shell: bash
+      env:
+        RELEASE_CHANNEL: ${{ inputs.channel }}
+        RELEASE_CLOSURE_BLOB_ROOT: ${{ runner.temp }}/release-projection/${{ inputs.target }}/closure-blobs
+        RELEASE_CLOSURE_BUILD_DIGEST: ${{ inputs.closure-identity-digest }}
+        RELEASE_CLOSURE_BUILD_KIND: target
+        RELEASE_CLOSURE_BUILD_TOKEN: target-${{ inputs.platform }}
+        RELEASE_CLOSURE_CONTRIBUTION_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/target-contribution.json
+        RELEASE_CLOSURE_CONTRIBUTION_KIND: target
+        RELEASE_CLOSURE_PUBLICATION_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/closure-publication.json
+        RELEASE_CLOSURE_REMOTE_PROJECTION: "true"
+        RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+      run: pnpm exec tools-release publish-closure-contribution
+
+    - name: Project ${{ inputs.target }} platform manifest
+      id: publish
+      shell: bash
+      env:
+        RELEASE_ARTIFACT_MODE: ${{ inputs.target == 'mac_arm64' && 'dmg-and-payload' || inputs.target == 'mac_x64' && 'all' || '' }}
+        RELEASE_ASSET_SUFFIX: ${{ inputs.target == 'win_x64' && '.unsigned' || '.signed' }}
+        RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-projection/${{ inputs.target }}/assets
+        RELEASE_CHANNEL: ${{ inputs.channel }}
+        RELEASE_CLOSURE_ENABLED: "false"
+        RELEASE_MANIFEST_DIR: ${{ runner.temp }}/release-platform-manifests
+        RELEASE_OUTPUTS_PATH: ${{ runner.temp }}/release-platform-outputs/${{ inputs.target }}.json
+        RELEASE_PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+        RELEASE_SHELL_BUILD_JSON_PATH: ${{ runner.temp }}/release-projection/${{ inputs.target }}/shell-build.json
+        RELEASE_SHELL_ENABLED: "true"
+        RELEASE_SHELL_REMOTE_PROJECTION: "true"
+        RELEASE_TARGET: ${{ inputs.target }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        WIN_INCLUDE_ZIP: "true"
+      run: |
+        mkdir -p "$RELEASE_ASSETS_DIR" "$RELEASE_MANIFEST_DIR" "$(dirname "$RELEASE_OUTPUTS_PATH")"
+        pnpm exec tools-release publish-platform
+
+    - name: Write projected ${{ inputs.target }} result
+      uses: actions/github-script@v8
+      env:
+        RELEASE_OUTPUTS_PATH: ${{ runner.temp }}/release-platform-outputs/${{ inputs.target }}.json
+        RESULT_PATH: ${{ runner.temp }}/release-platform-result/${{ inputs.target }}.json
+        RESULT_TARGET: ${{ inputs.target }}
+      with:
+        script: |
+          const fs = require("fs");
+          const path = require("path");
+          const outputs = JSON.parse(fs.readFileSync(process.env.RELEASE_OUTPUTS_PATH, "utf8"));
+          const url = outputs.dmg_url || outputs.installer_url || "";
+          fs.mkdirSync(path.dirname(process.env.RESULT_PATH), { recursive: true });
+          fs.writeFileSync(process.env.RESULT_PATH, JSON.stringify({
+            candidateManifestUrl: "",
+            smokeResult: "success",
+            target: process.env.RESULT_TARGET,
+            url,
+          }));
+
+    - name: Upload ${{ inputs.target }} publish manifest
+      uses: actions/upload-artifact@v7
+      with:
+        name: open-design-${{ inputs.channel }}-${{ inputs.artifact-id }}-publish-manifest
+        path: ${{ runner.temp }}/release-platform-manifests/${{ inputs.target }}.json
+        if-no-files-found: error
+
+    - name: Upload ${{ inputs.target }} Standalone contribution
+      uses: actions/upload-artifact@v7
+      with:
+        name: open-design-${{ inputs.channel }}-closure-${{ inputs.platform }}
+        path: ${{ runner.temp }}/release-projection/${{ inputs.target }}/target-contribution.json
+        if-no-files-found: error
+
+    - name: Upload ${{ inputs.target }} projection result
+      uses: actions/upload-artifact@v7
+      with:
+        name: open-design-${{ inputs.channel }}-${{ inputs.target }}-build-result
+        path: ${{ runner.temp }}/release-platform-result/${{ inputs.target }}.json
+        if-no-files-found: error
