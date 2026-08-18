@@ -120,7 +120,7 @@ jobs:
           HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.mac_arm64_closure }}
           HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.mac_arm64_shell }}
         with:
-          hash_skip: release.public_acceptance.mac
+          hash_skip: release.public-acceptance.mac
 
       - name: Probe mac_x64 public acceptance proof
         id: mac_x64
@@ -130,7 +130,7 @@ jobs:
           HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.mac_x64_closure }}
           HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.mac_x64_shell }}
         with:
-          hash_skip: release.public_acceptance.mac
+          hash_skip: release.public-acceptance.mac
 
       - name: Probe win_x64 public acceptance proof
         id: win_x64
@@ -140,7 +140,7 @@ jobs:
           HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.win_x64_closure }}
           HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.win_x64_shell }}
         with:
-          hash_skip: release.public_acceptance.win
+          hash_skip: release.public-acceptance.win
 
       - name: Select public acceptance topology
         id: selection
@@ -317,7 +317,7 @@ jobs:
           HASH_SKIP_EXTRA_CLOSURE: ${{ needs.plan.outputs.mac_arm64_closure }}
           HASH_SKIP_EXTRA_SHELL: ${{ needs.plan.outputs.mac_arm64_shell }}
         with:
-          hash_skip: release.public_acceptance.mac
+          hash_skip: release.public-acceptance.mac
           mode: complete
       - name: Register reusable mac_x64 public acceptance receipt
         if: ${{ needs.plan.outputs.mac_x64_run == 'true' }}
@@ -337,7 +337,7 @@ jobs:
           HASH_SKIP_EXTRA_CLOSURE: ${{ needs.plan.outputs.mac_x64_closure }}
           HASH_SKIP_EXTRA_SHELL: ${{ needs.plan.outputs.mac_x64_shell }}
         with:
-          hash_skip: release.public_acceptance.mac
+          hash_skip: release.public-acceptance.mac
           mode: complete
       - name: Register reusable win_x64 public acceptance receipt
         if: ${{ needs.plan.outputs.win_x64_run == 'true' }}
@@ -357,7 +357,7 @@ jobs:
           HASH_SKIP_EXTRA_CLOSURE: ${{ needs.plan.outputs.win_x64_closure }}
           HASH_SKIP_EXTRA_SHELL: ${{ needs.plan.outputs.win_x64_shell }}
         with:
-          hash_skip: release.public_acceptance.win
+          hash_skip: release.public-acceptance.win
           mode: complete
       - name: Project reusable public acceptance credentials
         if: ${{ needs.plan.outputs.reuse_json != '{}' }}

@@ -520,11 +520,12 @@ async function renderFeishuBuildCard(env: Record<string, string>): Promise<Recor
 
 describe("packaged smoke workflow", () => {
   it("[P1] keeps hash skip business-neutral and success-bound", async () => {
-    const [ci, hashSkip, mac, win] = await Promise.all([
+    const [ci, hashSkip, mac, win, declarations] = await Promise.all([
       readFile(ciWorkflowPath, "utf8"),
       readFile(hashSkipActionPath, "utf8"),
       readFile(betaMacDistributionActionPath, "utf8"),
       readFile(betaWinDistributionActionPath, "utf8"),
+      readdir(join(workspaceRoot, ".github", "hash_skip")),
     ]);
 
     expect(ci).toContain("node --experimental-strip-types .github/scripts/hash_skip.ts self-check");
@@ -533,6 +534,10 @@ describe("packaged smoke workflow", () => {
     expect(hashSkip.match(/enableCrossOsArchive: true/gu)).toHaveLength(2);
     expect(hashSkip).toContain("inputs.mode == 'complete'");
     expect(hashSkip).not.toContain("restore-keys:");
+    expect(declarations.filter((name) => name.endsWith(".json"))).not.toHaveLength(0);
+    for (const name of declarations.filter((entry) => entry.endsWith(".json"))) {
+      expect(name.slice(0, -".json".length)).toMatch(/^[a-z][a-z0-9.-]*$/u);
+    }
     for (const action of [mac, win]) {
       expect(action).toContain("uses: ./.github/actions/hash-skip");
       expect(action).toContain("mode: complete");
@@ -2422,8 +2427,8 @@ process.stdin.on("end", () => {
     expect(mac).toContain("root: join(toolsPackDir, 'runtime', 'mac')");
     expect(mac).not.toContain("root: join(homedir(), 'Library', 'Application Support'");
     expect(distribution).toContain("matrix: ${{ fromJSON(needs.plan.outputs.acceptance_matrix) }}");
-    expect(distribution).toContain("release.public_acceptance.mac");
-    expect(distribution).toContain("release.public_acceptance.win");
+    expect(distribution).toContain("release.public-acceptance.mac");
+    expect(distribution).toContain("release.public-acceptance.win");
     expect(distribution).toContain("tools-release register-public-acceptance-receipt");
     expect(distribution).toContain("tools-release project-public-acceptance");
     expect(distribution).toContain('"target":"mac_arm64"');
