@@ -529,7 +529,10 @@ describe("packaged smoke workflow", () => {
 
     expect(ci).toContain("node --experimental-strip-types .github/scripts/hash_skip.ts self-check");
     expect(hashSkip).toContain("uses: actions/cache@v5.0.5");
-    expect(hashSkip).toContain("lookup-only: true");
+    // The combined action's post step is the success-bound registration atom.
+    // lookup-only would silently disable registration and make every run miss.
+    expect(hashSkip).not.toContain("lookup-only:");
+    expect(hashSkip).not.toContain("actions/cache/save");
     expect(hashSkip).not.toContain("restore-keys:");
     for (const action of [mac, win]) {
       expect(action).toContain("uses: ./.github/actions/hash-skip");
