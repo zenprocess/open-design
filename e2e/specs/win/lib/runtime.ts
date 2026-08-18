@@ -40,6 +40,26 @@ export async function waitForHealthyDesktop(timeoutMs = 90_000): Promise<WinInsp
   throw new Error(`packaged windows runtime wait returned without healthy state: ${formatUnknown(inspect)}`);
 }
 
+export async function waitForDesktopStatus(
+  predicate: (status: NonNullable<WinInspectResult['status']>) => boolean,
+  label: string,
+  timeoutMs = 15_000,
+): Promise<WinInspectResult> {
+  const startedAt = Date.now();
+  let lastResult: unknown = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const inspect = await runToolsPackJson<WinInspectResult>('inspect');
+      lastResult = inspect;
+      if (inspect.status?.state === 'running' && predicate(inspect.status)) return inspect;
+    } catch (error) {
+      lastResult = error;
+    }
+    await delay(250);
+  }
+  throw new Error(`${label}: desktop status did not settle: ${formatUnknown(lastResult)}`);
+}
+
 export async function waitForDesktopStopped(timeoutMs = 15_000): Promise<void> {
   const startedAt = Date.now();
   let lastResult: unknown = null;
