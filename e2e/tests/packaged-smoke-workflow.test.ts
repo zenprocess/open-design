@@ -2281,6 +2281,10 @@ process.stdin.on("end", () => {
     expect(metadataJob).toContain("uses: actions/github-script@v8");
     expect(metadataJob).toContain('const profileRoot = path.join(process.env.RUNNER_TEMP, "release-identity-profiles")');
     expect(metadataJob).toContain('const profile = JSON.parse(result.stdout)');
+    expect(metadataJob).toContain('compileProfile("mac-arm64", "mac", "darwin-arm64"');
+    expect(metadataJob).toContain('compileProfile("mac-x64", "mac", "darwin-x64"');
+    expect(metadataJob).toContain('compileProfile("win-x64", "win", "win32-x64"');
+    expect(metadataJob).toContain("profile.target = target");
     expect(metadataJob).toContain('core.setOutput("build_matrix", JSON.stringify({ include }))');
     expect(metadataJob).toContain('core.setOutput("build_count", String(include.length))');
     expect(metadataJob).toContain("uses: ./.github/actions/hash-skip");

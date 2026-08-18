@@ -358,7 +358,7 @@ jobs:
 
             const shellVersion = process.env.RELEASE_VERSION;
             const channel = process.env.RELEASE_CHANNEL;
-            async function compileProfile(name, platform, args) {
+            async function compileProfile(name, platform, target, args) {
               const result = await exec.getExecOutput("pnpm", [
                 "exec", "tools-pack", platform, "identity",
                 "--dir", path.join(profileRoot, name),
@@ -370,19 +370,20 @@ jobs:
                 "--json",
               ]);
               const profile = JSON.parse(result.stdout);
+              profile.target = target;
               fs.writeFileSync(path.join(profileRoot, `${name}.json`), JSON.stringify(profile, null, 2));
               return profile.profileDigest;
             }
 
-            const macArm64Digest = await compileProfile("mac-arm64", "mac", [
+            const macArm64Digest = await compileProfile("mac-arm64", "mac", "darwin-arm64", [
               "--namespace", `release-${channel}`,
               "--mac-compression", "normal", "--to", "dmg", "--sign-mode", "notarized",
             ]);
-            const macX64Digest = await compileProfile("mac-x64", "mac", [
+            const macX64Digest = await compileProfile("mac-x64", "mac", "darwin-x64", [
               "--namespace", `release-${channel}-x64`,
               "--mac-compression", "normal", "--to", "all", "--sign-mode", "notarized",
             ]);
-            const winX64Digest = await compileProfile("win-x64", "win", [
+            const winX64Digest = await compileProfile("win-x64", "win", "win32-x64", [
               "--namespace", `release-${channel}-win`, "--to", "all", "--sign-mode", "unsigned",
             ]);
             const identityInputPath = path.join(identityRoot, "input.json");
