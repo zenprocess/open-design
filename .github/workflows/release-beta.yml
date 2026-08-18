@@ -135,6 +135,12 @@ jobs:
       closure_version: ${{ steps.reservation.outputs.release_version || steps.exact.outputs.release_version }}
       closure_min_shell_version: ${{ steps.exact.outputs.closure_min_shell_version }}
       closure_shared_identity_digest: ${{ steps.execution.outputs.shared_closure_digest }}
+      mac_arm64_closure_identity_digest: ${{ steps.execution.outputs.mac_arm64_closure_digest }}
+      mac_arm64_shell_identity_digest: ${{ steps.execution.outputs.mac_arm64_shell_digest }}
+      mac_x64_closure_identity_digest: ${{ steps.execution.outputs.mac_x64_closure_digest }}
+      mac_x64_shell_identity_digest: ${{ steps.execution.outputs.mac_x64_shell_digest }}
+      win_x64_closure_identity_digest: ${{ steps.execution.outputs.win_x64_closure_digest }}
+      win_x64_shell_identity_digest: ${{ steps.execution.outputs.win_x64_shell_digest }}
       branch: ${{ steps.identity.outputs.branch }}
       commit: ${{ steps.identity.outputs.commit }}
       previous_commit: ${{ steps.prev.outputs.previous_commit }}
@@ -954,6 +960,7 @@ jobs:
     secrets: inherit
     with:
       commit: ${{ needs.metadata.outputs.commit }}
+      content_identities: ${{ format('{{"mac_arm64":{{"closure":"{0}","shell":"{1}"}},"mac_x64":{{"closure":"{2}","shell":"{3}"}},"win_x64":{{"closure":"{4}","shell":"{5}"}}}}', needs.metadata.outputs.mac_arm64_closure_identity_digest, needs.metadata.outputs.mac_arm64_shell_identity_digest, needs.metadata.outputs.mac_x64_closure_identity_digest, needs.metadata.outputs.mac_x64_shell_identity_digest, needs.metadata.outputs.win_x64_closure_identity_digest, needs.metadata.outputs.win_x64_shell_identity_digest) }}
       exact_name: ${{ inputs.exact_name }}
       metadata_url: ${{ needs.stage.outputs.version_metadata_url }}
       mutable_metadata_url: ${{ needs.stage.outputs.acceptance_latest_url }}

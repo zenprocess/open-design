@@ -11,11 +11,16 @@ import { CLOSURE_BINDING_SCHEMA_VERSION } from "@open-design/closure/store";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { compareCountedReleaseVersions, sha256Digest } from "../src/storage/latest-publication.js";
+import { createPublicColdStartEvidence } from "../src/storage/cold-start-evidence.js";
 import {
   issuePublicWindowsAcceptance,
   preparePublicWindowsAcceptance,
   publicAcceptanceInternals,
 } from "../src/storage/public-acceptance.js";
+import {
+  projectPublicAcceptance,
+  registerPublicAcceptanceReceipt,
+} from "../src/storage/public-acceptance-receipt.js";
 
 const publicOrigin = "https://releases.example";
 const releaseVersion = "0.19.0-beta.27";
@@ -128,6 +133,90 @@ afterEach(async () => {
 });
 
 describe("public Windows release acceptance", () => {
+  it("projects an accepted content receipt onto a later public version without downloading installer bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "od-public-acceptance-projection-"));
+    temporaryRoots.push(root);
+    const source = fixture();
+    const plan = await preparePublicWindowsAcceptance({
+      buildJsonPath: join(root, "build.json"),
+      commit,
+      downloadDir: join(root, "download"),
+      fetchImpl: source.fetchImpl,
+      metadataUrl: source.metadataUrl,
+      namespace,
+      planPath: join(root, "plan.json"),
+      publicOrigin,
+      releaseVersion,
+    });
+    const credential = {
+      acceptedAt: plan.releaseGeneratedAt,
+      artifact: plan.artifact,
+      artifactKind: plan.artifactKind,
+      closure: plan.closure,
+      coldStart: createPublicColdStartEvidence(plan.coldStart, {
+        schemaVersion: 1,
+        status: "success",
+        timing: { launchDurationMs: 1, readinessBudgetMs: 300_000, readinessDurationMs: 2, totalDurationMs: 3 },
+      }),
+      commit,
+      metadata: plan.metadata,
+      namespace,
+      platformManifest: plan.platformManifest,
+      releaseVersion,
+      schemaVersion: 3,
+      smoke: { profile: "core", selectedLanes: ["shell"], status: "success", summaryDigest: sha256Digest("summary") },
+      status: "accepted",
+      target: "win_x64",
+    };
+    const credentialPath = join(root, "credential.json");
+    await writeFile(credentialPath, `${JSON.stringify(credential)}\n`);
+    const semanticDigest = sha256Digest("win public acceptance inputs");
+    const storageObjects = new Map<string, Buffer>();
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://storage.example/releases/")) {
+        const key = new URL(url).pathname.replace(/^\/releases\//u, "");
+        if (init?.method === "PUT") {
+          storageObjects.set(key, Buffer.from(init.body as Buffer));
+          return new Response("", { status: 200 });
+        }
+        const bytes = storageObjects.get(key);
+        return bytes == null ? new Response(null, { status: 404 }) : new Response(Uint8Array.from(bytes));
+      }
+      return source.fetchImpl(input as RequestInfo | URL, init);
+    });
+    const storage = {
+      accessKeyId: "test",
+      bucket: "releases",
+      endpoint: "https://storage.example",
+      endpointUrl: "https://storage.example",
+      region: "auto",
+      secretAccessKey: "test",
+    };
+    await registerPublicAcceptanceReceipt({ credentialPath, publicOrigin, semanticDigest, storage });
+      const projectedDir = join(root, "projected");
+      await projectPublicAcceptance({
+        channel: "beta",
+        commit,
+        credentialDir: projectedDir,
+        metadataUrl: source.metadataUrl,
+        publicOrigin,
+        releaseVersion,
+        semanticDigests: { win_x64: semanticDigest },
+        storage,
+        workDir: join(root, "projection-work"),
+      });
+      const projected = JSON.parse(await readFile(join(projectedDir, "win_x64.json"), "utf8"));
+      expect(projected).toMatchObject({
+        artifact: { digest: plan.artifact.digest, size: plan.artifact.size },
+        releaseVersion,
+        schemaVersion: 4,
+        target: "win_x64",
+        workflowProof: { semanticDigest },
+      });
+    expect(source.fetchImpl.mock.calls.some(([, init]) => init?.method === "HEAD")).toBe(true);
+  });
+
   it("downloads immutable public installer bytes and issues an exact Closure-bound smoke credential", async () => {
     const root = await mkdtemp(join(tmpdir(), "od-public-acceptance-"));
     temporaryRoots.push(root);

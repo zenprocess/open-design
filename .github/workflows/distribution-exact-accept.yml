@@ -12,6 +12,11 @@ on:
         description: "Candidate commit SHA from its manifest."
         required: true
         type: string
+      content_identities:
+        description: "Optional target Shell/Closure identity map enabling reusable content acceptance."
+        required: false
+        type: string
+        default: '{}'
       exact_name:
         description: "Candidate channel, including prerelease or an exact channel."
         required: true
@@ -41,6 +46,10 @@ on:
       commit:
         required: true
         type: string
+      content_identities:
+        required: false
+        type: string
+        default: '{}'
       exact_name:
         required: true
         type: string
@@ -62,11 +71,121 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    name: Plan public content acceptance
+    runs-on: ubuntu-latest
+    outputs:
+      acceptance_count: ${{ steps.selection.outputs.acceptance_count }}
+      acceptance_matrix: ${{ steps.selection.outputs.acceptance_matrix }}
+      mac_arm64_closure: ${{ steps.identities.outputs.mac_arm64_closure }}
+      mac_arm64_run: ${{ steps.selection.outputs.mac_arm64_run }}
+      mac_arm64_semantic: ${{ steps.mac_arm64.outputs.hash }}
+      mac_arm64_shell: ${{ steps.identities.outputs.mac_arm64_shell }}
+      mac_x64_closure: ${{ steps.identities.outputs.mac_x64_closure }}
+      mac_x64_run: ${{ steps.selection.outputs.mac_x64_run }}
+      mac_x64_semantic: ${{ steps.mac_x64.outputs.hash }}
+      mac_x64_shell: ${{ steps.identities.outputs.mac_x64_shell }}
+      reuse_json: ${{ steps.selection.outputs.reuse_json }}
+      win_x64_closure: ${{ steps.identities.outputs.win_x64_closure }}
+      win_x64_run: ${{ steps.selection.outputs.win_x64_run }}
+      win_x64_semantic: ${{ steps.win_x64.outputs.hash }}
+      win_x64_shell: ${{ steps.identities.outputs.win_x64_shell }}
+    steps:
+      - name: Checkout accepted commit
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.commit }}
+      - name: Resolve acceptance content identities
+        id: identities
+        uses: actions/github-script@v8
+        env:
+          CONTENT_IDENTITIES: ${{ inputs.content_identities }}
+        with:
+          script: |
+            const identities = JSON.parse(process.env.CONTENT_IDENTITIES || "{}");
+            const targets = ["mac_arm64", "mac_x64", "win_x64"];
+            const digest = /^sha256:[0-9a-f]{64}$/;
+            const enabled = targets.every((target) => digest.test(identities[target]?.closure || "") && digest.test(identities[target]?.shell || ""));
+            core.setOutput("enabled", String(enabled));
+            for (const target of targets) {
+              core.setOutput(`${target}_closure`, identities[target]?.closure || "");
+              core.setOutput(`${target}_shell`, identities[target]?.shell || "");
+            }
+
+      - name: Probe mac_arm64 public acceptance proof
+        id: mac_arm64
+        if: ${{ steps.identities.outputs.enabled == 'true' }}
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.mac_arm64_closure }}
+          HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.mac_arm64_shell }}
+        with:
+          hash_skip: release.public_acceptance.mac
+
+      - name: Probe mac_x64 public acceptance proof
+        id: mac_x64
+        if: ${{ steps.identities.outputs.enabled == 'true' }}
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.mac_x64_closure }}
+          HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.mac_x64_shell }}
+        with:
+          hash_skip: release.public_acceptance.mac
+
+      - name: Probe win_x64 public acceptance proof
+        id: win_x64
+        if: ${{ steps.identities.outputs.enabled == 'true' }}
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ steps.identities.outputs.win_x64_closure }}
+          HASH_SKIP_EXTRA_SHELL: ${{ steps.identities.outputs.win_x64_shell }}
+        with:
+          hash_skip: release.public_acceptance.win
+
+      - name: Select public acceptance topology
+        id: selection
+        uses: actions/github-script@v8
+        env:
+          ACCEPTANCE_MATRIX: ${{ inputs.acceptance_matrix }}
+          CONTENT_IDENTITIES: ${{ inputs.content_identities }}
+          CONTENT_IDENTITIES_ENABLED: ${{ steps.identities.outputs.enabled }}
+          MAC_ARM64_HASH: ${{ steps.mac_arm64.outputs.hash }}
+          MAC_ARM64_REUSE: ${{ steps.mac_arm64.outputs.skip }}
+          MAC_X64_HASH: ${{ steps.mac_x64.outputs.hash }}
+          MAC_X64_REUSE: ${{ steps.mac_x64.outputs.skip }}
+          WIN_X64_HASH: ${{ steps.win_x64.outputs.hash }}
+          WIN_X64_REUSE: ${{ steps.win_x64.outputs.skip }}
+        with:
+          script: |
+            const matrix = JSON.parse(process.env.ACCEPTANCE_MATRIX);
+            const identities = JSON.parse(process.env.CONTENT_IDENTITIES || "{}");
+            const enabled = process.env.CONTENT_IDENTITIES_ENABLED === "true";
+            const proof = {
+              mac_arm64: { hash: process.env.MAC_ARM64_HASH, reuse: process.env.MAC_ARM64_REUSE === "true" },
+              mac_x64: { hash: process.env.MAC_X64_HASH, reuse: process.env.MAC_X64_REUSE === "true" },
+              win_x64: { hash: process.env.WIN_X64_HASH, reuse: process.env.WIN_X64_REUSE === "true" },
+            };
+            const include = matrix.include.filter(({ target }) => !enabled || !proof[target].reuse).map((entry) => ({
+              ...entry,
+              closure_identity_digest: identities[entry.target]?.closure || "",
+              semantic_digest: enabled ? proof[entry.target].hash : "",
+              shell_identity_digest: identities[entry.target]?.shell || "",
+            }));
+            const reuse = Object.fromEntries(matrix.include.filter(({ target }) => enabled && proof[target].reuse).map(({ target }) => [target, proof[target].hash]));
+            core.setOutput("acceptance_count", String(include.length));
+            core.setOutput("acceptance_matrix", JSON.stringify({ include }));
+            core.setOutput("reuse_json", JSON.stringify(reuse));
+            for (const target of ["mac_arm64", "mac_x64", "win_x64"]) {
+              core.setOutput(`${target}_run`, String(include.some((entry) => entry.target === target) && enabled));
+            }
+
   public_acceptance:
     name: Accept public ${{ matrix.target }} exact artifacts
+    needs: plan
+    if: ${{ needs.plan.outputs.acceptance_count != '0' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(inputs.acceptance_matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.acceptance_matrix) }}
     runs-on: ${{ matrix.runner }}
     env:
       GITHUB_SHA: ${{ inputs.commit }}
@@ -148,8 +267,8 @@ jobs:
 
   activate:
     name: Activate accepted exact release
-    needs: public_acceptance
-    if: ${{ !cancelled() && (needs.public_acceptance.result == 'success' || needs.public_acceptance.result == 'skipped') }}
+    needs: [plan, public_acceptance]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.public_acceptance.result == 'success' || needs.public_acceptance.result == 'skipped') }}
     runs-on: ubuntu-latest
     env:
       OPEN_DESIGN_POSTINSTALL_LEVEL: release-prepare
@@ -174,12 +293,86 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Download all public acceptance credentials
-        if: ${{ inputs.acceptance_matrix != '{"include":[]}' }}
+        if: ${{ needs.plan.outputs.acceptance_count != '0' }}
         uses: actions/download-artifact@v8
         with:
           pattern: open-design-${{ inputs.exact_name }}-*-public-acceptance
           merge-multiple: true
           path: ${{ runner.temp }}/public-acceptance
+      - name: Register reusable mac_arm64 public acceptance receipt
+        if: ${{ needs.plan.outputs.mac_arm64_run == 'true' }}
+        env:
+          RELEASE_PUBLIC_ACCEPTANCE_CREDENTIAL_PATH: ${{ runner.temp }}/public-acceptance/mac_arm64.json
+          RELEASE_PUBLIC_ACCEPTANCE_SEMANTIC_DIGEST: ${{ needs.plan.outputs.mac_arm64_semantic }}
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+        run: pnpm exec tools-release register-public-acceptance-receipt
+      - name: Register completed mac_arm64 public acceptance
+        if: ${{ needs.plan.outputs.mac_arm64_run == 'true' }}
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ needs.plan.outputs.mac_arm64_closure }}
+          HASH_SKIP_EXTRA_SHELL: ${{ needs.plan.outputs.mac_arm64_shell }}
+        with:
+          hash_skip: release.public_acceptance.mac
+          mode: complete
+      - name: Register reusable mac_x64 public acceptance receipt
+        if: ${{ needs.plan.outputs.mac_x64_run == 'true' }}
+        env:
+          RELEASE_PUBLIC_ACCEPTANCE_CREDENTIAL_PATH: ${{ runner.temp }}/public-acceptance/mac_x64.json
+          RELEASE_PUBLIC_ACCEPTANCE_SEMANTIC_DIGEST: ${{ needs.plan.outputs.mac_x64_semantic }}
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+        run: pnpm exec tools-release register-public-acceptance-receipt
+      - name: Register completed mac_x64 public acceptance
+        if: ${{ needs.plan.outputs.mac_x64_run == 'true' }}
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ needs.plan.outputs.mac_x64_closure }}
+          HASH_SKIP_EXTRA_SHELL: ${{ needs.plan.outputs.mac_x64_shell }}
+        with:
+          hash_skip: release.public_acceptance.mac
+          mode: complete
+      - name: Register reusable win_x64 public acceptance receipt
+        if: ${{ needs.plan.outputs.win_x64_run == 'true' }}
+        env:
+          RELEASE_PUBLIC_ACCEPTANCE_CREDENTIAL_PATH: ${{ runner.temp }}/public-acceptance/win_x64.json
+          RELEASE_PUBLIC_ACCEPTANCE_SEMANTIC_DIGEST: ${{ needs.plan.outputs.win_x64_semantic }}
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+        run: pnpm exec tools-release register-public-acceptance-receipt
+      - name: Register completed win_x64 public acceptance
+        if: ${{ needs.plan.outputs.win_x64_run == 'true' }}
+        uses: ./.github/actions/hash-skip
+        env:
+          HASH_SKIP_EXTRA_CLOSURE: ${{ needs.plan.outputs.win_x64_closure }}
+          HASH_SKIP_EXTRA_SHELL: ${{ needs.plan.outputs.win_x64_shell }}
+        with:
+          hash_skip: release.public_acceptance.win
+          mode: complete
+      - name: Project reusable public acceptance credentials
+        if: ${{ needs.plan.outputs.reuse_json != '{}' }}
+        env:
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          RELEASE_METADATA_URL: ${{ inputs.metadata_url }}
+          RELEASE_PUBLIC_ACCEPTANCE_CREDENTIAL_DIR: ${{ runner.temp }}/public-acceptance
+          RELEASE_PUBLIC_ACCEPTANCE_REUSE_JSON: ${{ needs.plan.outputs.reuse_json }}
+          RELEASE_PUBLIC_ACCEPTANCE_WORK_DIR: ${{ runner.temp }}/public-acceptance-projection
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+        run: pnpm exec tools-release project-public-acceptance
       - name: Issue stable qualification for accepted prerelease
         if: ${{ inputs.exact_name == 'prerelease' }}
         env:

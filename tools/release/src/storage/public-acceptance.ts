@@ -303,12 +303,12 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchPublic(url: string, fetchImpl: typeof fetch): Promise<Response> {
+async function fetchPublic(url: string, fetchImpl: typeof fetch, init: RequestInit = {}): Promise<Response> {
   let lastStatus = 0;
   let lastError: unknown;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
-      const response = await fetchImpl(url, { redirect: "follow" });
+      const response = await fetchImpl(url, { ...init, redirect: "follow" });
       lastStatus = response.status;
       if (response.ok) return response;
       await response.body?.cancel().catch(() => undefined);
@@ -360,6 +360,18 @@ async function downloadBoundArtifact(input: {
   }
 }
 
+async function probeBoundArtifact(input: {
+  binding: PublicArtifactBinding;
+  fetchImpl: typeof fetch;
+}): Promise<void> {
+  const response = await fetchPublic(input.binding.url, input.fetchImpl, { method: "HEAD" });
+  await response.body?.cancel().catch(() => undefined);
+  const contentLength = response.headers.get("content-length");
+  if (contentLength != null && Number(contentLength) !== input.binding.size) {
+    throw new Error(`public artifact size mismatch for ${input.binding.url}: expected ${input.binding.size}, got ${contentLength}`);
+  }
+}
+
 async function describeFile(path: string): Promise<{ digest: string; size: number }> {
   const hash = createHash("sha256");
   const stream = createReadStream(path);
@@ -389,6 +401,7 @@ export async function preparePublicAcceptance(input: {
   downloadDir: string;
   fetchImpl?: typeof fetch;
   metadataUrl: string;
+  materializeArtifact?: boolean;
   namespace: string;
   planPath: string;
   publicOrigin: string;
@@ -431,14 +444,16 @@ export async function preparePublicAcceptance(input: {
   });
   assertPublicImmutableUrl(artifact.url, input.publicOrigin, `${definition.artifactKind} URL`);
 
+  const materializeArtifact = input.materializeArtifact ?? true;
   const artifactName = decodeURIComponent(basename(new URL(artifact.url).pathname));
   const artifactPath = join(input.downloadDir, artifactName);
-  await downloadBoundArtifact({ binding: artifact, fetchImpl, path: artifactPath });
+  if (materializeArtifact) await downloadBoundArtifact({ binding: artifact, fetchImpl, path: artifactPath });
+  else await probeBoundArtifact({ binding: artifact, fetchImpl });
   const toolsPackArtifactPath = join(
     input.downloadDir,
     definition.toolsPackArtifactName(input.namespace),
   );
-  if (toolsPackArtifactPath !== artifactPath) {
+  if (materializeArtifact && toolsPackArtifactPath !== artifactPath) {
     // Public names are release-oriented while tools-pack paths intentionally
     // remain namespace-oriented. A hard link preserves both contracts without
     // duplicating the large installer during clean-slate public acceptance.
@@ -476,7 +491,7 @@ export async function preparePublicAcceptance(input: {
     schemaVersion: 3,
     target: input.target,
   };
-  writeJson(input.buildJsonPath, { [definition.buildJsonField]: artifactPath });
+  if (materializeArtifact) writeJson(input.buildJsonPath, { [definition.buildJsonField]: artifactPath });
   writeJson(input.planPath, plan);
   return plan;
 }

@@ -309,6 +309,18 @@ cli
   });
 
 cli
+  .command("register-public-acceptance-receipt", "Register installed public acceptance for one reusable content identity")
+  .action(async () => {
+    await import("./storage/register-public-acceptance-receipt.ts");
+  });
+
+cli
+  .command("project-public-acceptance", "Bind reusable content acceptance to a new public version projection")
+  .action(async () => {
+    await import("./storage/project-public-acceptance.ts");
+  });
+
+cli
   .command("activate-public-release", "Activate an accepted public release with a latest metadata CAS")
   .action(async () => {
     await import("./storage/activate-public-release.ts");

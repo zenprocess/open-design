@@ -1,0 +1,18 @@
+{
+  "extraDigests": [
+    "closure",
+    "shell"
+  ],
+  "hashPaths": [
+    ".github/workflows/distribution-exact-accept.yml",
+    "e2e/lib/desktop",
+    "e2e/lib/vitest",
+    "e2e/scripts/release-smoke.ts",
+    "e2e/specs/win.spec.ts",
+    "e2e/specs/win",
+    "tools/release/src/storage/cold-start-evidence.ts",
+    "tools/release/src/storage/public-acceptance-receipt.ts",
+    "tools/release/src/storage/public-acceptance.ts"
+  ],
+  "schemaVersion": 1
+}

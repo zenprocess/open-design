@@ -2420,7 +2420,11 @@ process.stdin.on("end", () => {
     }
     expect(mac).toContain("root: join(toolsPackDir, 'runtime', 'mac')");
     expect(mac).not.toContain("root: join(homedir(), 'Library', 'Application Support'");
-    expect(distribution).toContain("matrix: ${{ fromJSON(inputs.acceptance_matrix) }}");
+    expect(distribution).toContain("matrix: ${{ fromJSON(needs.plan.outputs.acceptance_matrix) }}");
+    expect(distribution).toContain("release.public_acceptance.mac");
+    expect(distribution).toContain("release.public_acceptance.win");
+    expect(distribution).toContain("tools-release register-public-acceptance-receipt");
+    expect(distribution).toContain("tools-release project-public-acceptance");
     expect(distribution).toContain('"target":"mac_arm64"');
     expect(distribution).toContain('"target":"mac_x64"');
     expect(distribution).toContain('"target":"win_x64"');
@@ -3086,7 +3090,7 @@ process.stdin.on("end", () => {
     expect(workflow).toContain("RELEASE_WIN_X64_SIGN_MODE: unsigned");
     expect(stageJob).not.toContain("Observe directly activated beta public feed");
     expect(publicAcceptanceJob).toContain("runs-on: ${{ matrix.runner }}");
-    expect(publicAcceptanceJob).toContain("matrix: ${{ fromJSON(inputs.acceptance_matrix) }}");
+    expect(publicAcceptanceJob).toContain("matrix: ${{ fromJSON(needs.plan.outputs.acceptance_matrix) }}");
     expect(publicAcceptanceJob).toContain("OPEN_DESIGN_POSTINSTALL_LEVEL: release-smoke");
     expect(publicAcceptanceJob).toContain("tools-release prepare-public-acceptance");
     expect(publicAcceptanceJob).toContain("tools-release issue-public-acceptance");
