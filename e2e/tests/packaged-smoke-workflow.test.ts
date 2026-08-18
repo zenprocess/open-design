@@ -3164,6 +3164,8 @@ process.stdin.on("end", () => {
     expect(publicAcceptanceJob).not.toContain("RELEASE_STORAGE_SECRET_ACCESS_KEY");
     expect(activationJob).toContain("needs.public_acceptance.result == 'success' || needs.public_acceptance.result == 'skipped'");
     expect(activationJob).not.toContain("tools-release workflow");
+    expect(acceptanceActivation).toContain("RELEASE_CHANNEL: ${{ inputs.channel }}");
+    expect(acceptanceActivation).toContain("RELEASE_VERSION: ${{ inputs.release-version }}");
     expect(activationSurface).toContain("tools-release activate-public-release");
     expect(activationSurface).toContain("Activate accepted immutable exact metadata with CAS");
     expect(activationSurface).toContain("Read back activated exact public feed");
