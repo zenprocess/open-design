@@ -167,6 +167,14 @@ const mainPrereleaseWinSmokeWorkflowPath = join(
 const releaseStableWorkflowPath = join(workspaceRoot, ".github", "workflows", "release-stable.yml");
 const distributionStableWorkflowPath = join(workspaceRoot, ".github", "workflows", "distribution-stable.yml");
 const releaseStableNotesScriptPath = join(workspaceRoot, ".github", "scripts", "release", "github", "stable-notes.sh");
+const cleanupArtifactsScriptPath = join(
+  workspaceRoot,
+  ".github",
+  "scripts",
+  "release",
+  "github",
+  "cleanup-artifacts.sh",
+);
 const releaseStableScriptPath = join(workspaceRoot, "tools", "release", "src", "metadata", "prepare-stable.ts");
 const releaseBetaScriptPath = join(workspaceRoot, "tools", "release", "src", "metadata", "prepare-exact.ts");
 const shellPackageJsonPath = join(workspaceRoot, "shells", "electron", "package.json");
@@ -3123,6 +3131,56 @@ process.stdin.on("end", () => {
     expect(macSpec).toContain("collectMacLaunchServicesLog({ bundleId, executableName })");
     expect(macSpec).toContain("...(packagedHeadless ? ['-g'] : [])");
     expect(macSpec).toContain("installedAppPath,\n    packagedInviteDeeplink");
+  });
+
+  it.skipIf(process.platform === "win32")("keeps post-publish artifact cleanup best-effort across GitHub API failures", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "od-artifact-cleanup-"));
+    const ghPath = join(tempDir, "gh");
+    const statePath = join(tempDir, "delete-attempts");
+    const fakeGh = `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args.some((arg) => arg.includes("/actions/runs/") && arg.includes("/artifacts?"))) {
+  process.stdout.write("123\\tintermediate-artifact\\n");
+  process.exit(0);
+}
+const attempt = Number(fs.existsSync(process.env.FAKE_GH_STATE) ? fs.readFileSync(process.env.FAKE_GH_STATE, "utf8") : "0") + 1;
+fs.writeFileSync(process.env.FAKE_GH_STATE, String(attempt));
+if (attempt <= Number(process.env.FAKE_DELETE_FAILURES)) {
+  process.stderr.write("HTTP 503\\n");
+  process.exit(1);
+}
+`;
+
+    try {
+      await writeFile(ghPath, fakeGh);
+      await chmod(ghPath, 0o755);
+      const cleanupEnv = {
+        ...launchEnv,
+        PATH: `${tempDir}${delimiter}${launchPath}`,
+        GITHUB_REPOSITORY: "nexu-io/open-design",
+        GITHUB_RUN_ID: "42",
+        GH_TOKEN: "test-token",
+        ARTIFACT_CLEANUP_API_ATTEMPTS: "2",
+        ARTIFACT_CLEANUP_RETRY_DELAY_SECONDS: "0",
+        FAKE_GH_STATE: statePath,
+      };
+
+      const recovered = await execFileAsync("bash", [cleanupArtifactsScriptPath], {
+        env: { ...cleanupEnv, FAKE_DELETE_FAILURES: "1" },
+      });
+      expect(recovered.stdout).toContain("Deleted 1 workflow artifacts");
+      expect(recovered.stderr).toContain("retrying");
+
+      await rm(statePath, { force: true });
+      const deferred = await execFileAsync("bash", [cleanupArtifactsScriptPath], {
+        env: { ...cleanupEnv, FAKE_DELETE_FAILURES: "9" },
+      });
+      expect(deferred.stdout).toContain("Workflow artifact cleanup deferred");
+      expect(deferred.stdout).toContain("Deferred cleanup of 1 workflow artifacts");
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
   });
 
   it("keeps local macOS saturation complete through a package-level background agent", async () => {
