@@ -923,6 +923,17 @@ export interface CloudflareWorkersBinding {
   id?: string;
 }
 
+export type CloudflareWorkersAccessRule =
+  | { kind: 'emails'; emails: string[] }
+  | { kind: 'emailDomain'; emailDomain: string }
+  | { kind: 'self' }
+  | { kind: 'policy'; policyId: string };
+
+export interface CloudflareWorkersAccess {
+  enabled: boolean;
+  rule?: CloudflareWorkersAccessRule;
+}
+
 export interface CloudflareWorkersCapabilities {
   workers: boolean;
   workersDevSubdomain: string;
@@ -930,6 +941,8 @@ export interface CloudflareWorkersCapabilities {
   r2Reason?: string;
   d1: boolean;
   d1Reason?: string;
+  access: boolean;
+  accessReason?: string;
   configured?: boolean;
 }
 
@@ -961,6 +974,7 @@ export interface DeployConfigResponse {
   redirectUri?: string;
   scopes?: string[];
   bindings?: CloudflareWorkersBinding[];
+  access?: CloudflareWorkersAccess;
   cloudflarePages?: CloudflarePagesConfigHints;
   customDomain?: { hostname: string; zoneId: string };
   target: 'preview' | 'production';
@@ -980,6 +994,7 @@ export interface UpdateDeployConfigRequest {
   redirectUri?: string;
   scopes?: string[];
   bindings?: CloudflareWorkersBinding[];
+  access?: CloudflareWorkersAccess;
   cloudflarePages?: CloudflarePagesConfigHints;
   customDomain?: { hostname: string; zoneId: string };
 }

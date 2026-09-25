@@ -329,6 +329,174 @@ async function enableWorkerSubdomain(config: WorkersDeployConfig, scriptName: st
   return 'https://' + scriptName + '.' + subdomain + '.workers.dev';
 }
 
+export type CloudflareWorkersAccessRule =
+  | { kind: 'emails'; emails: string[] }
+  | { kind: 'emailDomain'; emailDomain: string }
+  | { kind: 'self' }
+  | { kind: 'policy'; policyId: string };
+
+function accessRuleInclude(rule: CloudflareWorkersAccessRule, selfEmail: string): JsonObject[] {
+  switch (rule.kind) {
+    case 'emails':
+      return (rule.emails || []).filter(Boolean).map((email) => ({ email: { email } }));
+    case 'emailDomain':
+      return rule.emailDomain ? [{ email_domain: { domain: rule.emailDomain } }] : [];
+    case 'self':
+      return selfEmail ? [{ email: { email: selfEmail } }] : [];
+    case 'policy':
+      return [];
+  }
+}
+
+async function resolveCloudflareSelfEmail(token: string): Promise<string> {
+  const resp = await fetch(CLOUDFLARE_API + '/user', { headers: cloudflareHeaders(token) });
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success !== true) return '';
+  const result = (json.result ?? {}) as JsonObject;
+  return typeof result.email === 'string' ? result.email : '';
+}
+
+async function getCloudflareWorkerTag(config: WorkersDeployConfig, scriptName: string): Promise<string> {
+  const resp = await fetchWithRetry(
+    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts',
+    { method: 'GET', headers: cloudflareHeaders(config.token) },
+  );
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success === false) return '';
+  const scripts = Array.isArray(json.result) ? (json.result as JsonObject[]) : [];
+  const script = scripts.find((item) => item?.id === scriptName);
+  return typeof script?.tag === 'string' ? script.tag : '';
+}
+
+// One-time PIN (OTP) is not auto-added to new Zero Trust orgs — the default is
+// the "Cloudflare" login (full Cloudflare account sign-in). To make the email
+// one-time code the sign-in method, register an `onetimepin` identity provider
+// and pin the app to it via `allowed_idps`.
+async function ensureCloudflareOtpIdentityProvider(config: WorkersDeployConfig): Promise<string> {
+  const base = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/identity_providers';
+  const listResp = await fetchWithRetry(base, { method: 'GET', headers: cloudflareHeaders(config.token) });
+  const listJson = await readCloudflareJson(listResp);
+  if (listResp.ok && listJson.success === true && Array.isArray(listJson.result)) {
+    const existing = (listJson.result as JsonObject[]).find((p) => p?.type === 'onetimepin');
+    if (existing && typeof existing.id === 'string') return existing.id;
+  }
+  const createResp = await fetchWithRetry(
+    base,
+    {
+      method: 'POST',
+      headers: cloudflareHeaders(config.token, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ name: 'One-time PIN login', type: 'onetimepin', config: {} }),
+    },
+  );
+  const createJson = await readCloudflareJson(createResp);
+  if (!createResp.ok || createJson.success === false) {
+    throw new DeployError(
+      'Cloudflare Access one-time PIN (OTP) login needs the "Identity Providers Write" permission. Reconnect Cloudflare to grant it, then redeploy.',
+      createResp.status || 403,
+      undefined,
+      'CFW_ACCESS_OTP_SCOPE_REQUIRED',
+    );
+  }
+  const created = (createJson.result ?? {}) as JsonObject;
+  if (typeof created.id === 'string') return created.id;
+  throw new DeployError('Cloudflare Access one-time PIN provider returned no id.', 502, undefined, 'CFW_ACCESS_CREATE_FAILED');
+}
+
+// An Access destination (a Worker tag) can belong to only one application —
+// POSTing a second app for the same Worker fails with
+// "access.api.error.conflict: destination belongs to another application".
+// Find the app that already claims this Worker so we can update it in place.
+async function findCloudflareAccessAppByWorker(config: WorkersDeployConfig, workerId: string): Promise<JsonObject | null> {
+  const resp = await fetchWithRetry(
+    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps',
+    { method: 'GET', headers: cloudflareHeaders(config.token) },
+  );
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success !== true || !Array.isArray(json.result)) return null;
+  const apps = json.result as JsonObject[];
+  return (
+    apps.find((a) => {
+      const dests = Array.isArray(a?.destinations) ? (a.destinations as JsonObject[]) : [];
+      return dests.some((d) => d?.type === 'worker' && d?.worker_id === workerId);
+    }) ?? null
+  );
+}
+
+async function createCloudflareAccessApp(
+  config: WorkersDeployConfig,
+  input: { scriptName: string; rule: CloudflareWorkersAccessRule; includePreview: boolean },
+): Promise<{ appId: string }> {
+  const selfEmail = input.rule.kind === 'self' ? await resolveCloudflareSelfEmail(config.token) : '';
+  if (input.rule.kind === 'self' && !selfEmail) {
+    throw new DeployError(
+      'Could not resolve the connected Cloudflare account email for "only me" access. Specify a specific email instead.',
+      400,
+      undefined,
+      'CFW_ACCESS_SELF_EMAIL',
+    );
+  }
+  // Access destinations key on the Worker's tag (a UUID from GET /workers/scripts),
+  // not its script name — the name is rejected with "worker_id ... is invalid".
+  const workerId = await getCloudflareWorkerTag(config, input.scriptName);
+  if (!workerId) {
+    throw new DeployError(
+      'Could not resolve the Cloudflare Worker tag for "' + input.scriptName + '".',
+      502,
+      undefined,
+      'CFW_ACCESS_CREATE_FAILED',
+    );
+  }
+  const destinations: JsonObject[] = [{ type: 'worker', worker_id: workerId }];
+  if (input.includePreview) destinations.push({ type: 'preview_worker', worker_id: workerId });
+  const otpId = await ensureCloudflareOtpIdentityProvider(config);
+  const body: JsonObject = {
+    name: input.scriptName + ' (OpenDesign)',
+    type: 'self_hosted',
+    destinations,
+    allowed_idps: [otpId],
+  };
+  if (input.rule.kind === 'policy') {
+    body.policies = [{ id: input.rule.policyId, precedence: 1 }];
+  } else {
+    const include = accessRuleInclude(input.rule, selfEmail);
+    if (include.length === 0) {
+      throw new DeployError('Cloudflare Access rule is empty — add at least one email or a domain.', 400, undefined, 'CFW_ACCESS_EMPTY_RULE');
+    }
+    body.policies = [{ name: 'Allow', decision: 'allow', include, precedence: 1 }];
+  }
+  const existing = await findCloudflareAccessAppByWorker(config, workerId);
+  const existingId = existing && typeof existing.id === 'string' ? existing.id : '';
+  const path = existingId
+    ? CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps/' + encodeURIComponent(existingId)
+    : CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps';
+  const resp = await fetchWithRetry(
+    path,
+    {
+      method: existingId ? 'PUT' : 'POST',
+      headers: cloudflareHeaders(config.token, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    },
+  );
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success === false) {
+    throw cloudflareError(json, resp.status, 'Cloudflare Access app ' + (existingId ? 'update' : 'creation') + ' failed.');
+  }
+  const result = (json.result ?? {}) as JsonObject;
+  const appId = typeof result.id === 'string' ? result.id : existingId;
+  if (!appId) throw new DeployError('Cloudflare Access app returned no app id.', 502, undefined, 'CFW_ACCESS_CREATE_FAILED');
+  return { appId };
+}
+
+async function deleteCloudflareAccessApp(config: WorkersDeployConfig, appId: string): Promise<void> {
+  const resp = await fetchWithRetry(
+    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps/' + encodeURIComponent(appId),
+    { method: 'DELETE', headers: cloudflareHeaders(config.token) },
+  );
+  if (resp.status === 404) return;
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success === false) throw cloudflareError(json, resp.status, 'Cloudflare Access app deletion failed.');
+}
+
 export async function deployToCloudflareWorkers(input: {
   config: {
     token: string;
@@ -342,9 +510,11 @@ export async function deployToCloudflareWorkers(input: {
   projectId?: string;
   projectName?: string;
   target?: 'preview' | 'production';
+  access?: { enabled: boolean; rule?: CloudflareWorkersAccessRule };
+  priorAccessAppId?: string;
   customDomain?: { hostname: string; zoneId: string } | undefined;
 }): Promise<CloudflareWorkersDeployResult> {
-  const { config, files, projectId = '', projectName = '', target = 'production', customDomain } = input ?? {};
+  const { config, files, projectId = '', projectName = '', target = 'production', access, priorAccessAppId, customDomain } = input ?? {};
   const accountId = config?.accountId;
   if (!accountId) throw new DeployError('Cloudflare account ID is required.', 400, undefined, 'CFW_ACCOUNT_ID_REQUIRED');
   // Resolve the live credential: the configured static API token in 'token'
@@ -402,6 +572,24 @@ export async function deployToCloudflareWorkers(input: {
       const versionId = await uploadWorkerVersion(cfg, scriptName, moduleCode, completionJwt, isCustomModule);
       steps.push({ name: 'version', status: 'done' });
       const metadata: JsonObject = { scriptName, versionId };
+      if (access?.enabled && access.rule) {
+        const app = await createCloudflareAccessApp(cfg, {
+          scriptName,
+          rule: access.rule,
+          includePreview: true,
+        });
+        metadata.accessProtected = true;
+        metadata.accessAppId = app.appId;
+        metadata.createdByOpenDesign = true;
+        steps.push({ name: 'access-app', status: 'done', detail: app.appId });
+        if (priorAccessAppId && priorAccessAppId !== app.appId) {
+          try {
+            await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+          } catch {
+            // best-effort: a stale Access app may linger; the new app still governs.
+          }
+        }
+      }
       metadata.steps = steps;
       const prefix = versionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'preview';
       return {
@@ -420,6 +608,22 @@ export async function deployToCloudflareWorkers(input: {
     const subdomain = await readAccountSubdomain(cfg);
     const url = 'https://' + scriptName + '.' + subdomain + '.workers.dev';
     const metadata: JsonObject = { scriptName };
+    if (access?.enabled && access.rule) {
+      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access.rule, includePreview: true });
+      metadata.accessProtected = true;
+      metadata.accessAppId = app.appId;
+      metadata.createdByOpenDesign = true;
+      steps.push({ name: 'access-app', status: 'done', detail: app.appId });
+      if (priorAccessAppId && priorAccessAppId !== app.appId) {
+        try {
+          await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+        } catch {
+          // best-effort: a stale Access app may linger; the new app still governs.
+        }
+      }
+    } else if (priorAccessAppId) {
+      await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+    }
     await enableWorkerSubdomain(cfg, scriptName, subdomain);
     steps.push({ name: 'subdomain', status: 'done', detail: url });
     try {
@@ -469,13 +673,15 @@ export type CloudflareWorkersCapabilities = {
   r2Reason?: string;
   d1: boolean;
   d1Reason?: string;
+  access: boolean;
+  accessReason?: string;
 };
 
 export async function probeCloudflareWorkersCapabilities(input: { token: string; accountId: string }): Promise<CloudflareWorkersCapabilities> {
   const token = input.token;
   const accountId = input.accountId;
   const base = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(accountId);
-  const caps: CloudflareWorkersCapabilities = { workers: false, workersDevSubdomain: '', r2: false, d1: false };
+  const caps: CloudflareWorkersCapabilities = { workers: false, workersDevSubdomain: '', r2: false, d1: false, access: false };
 
   async function probe(path: string): Promise<{ success: boolean; code?: number; subdomain?: string }> {
     try {
@@ -506,6 +712,10 @@ export async function probeCloudflareWorkersCapabilities(input: { token: string;
   const d1 = await probe('/d1/database');
   caps.d1 = d1.success;
   if (!d1.success) caps.d1Reason = d1.code === 10000 ? 'no-permission' : 'unknown';
+
+  const access = await probe('/access/apps');
+  caps.access = access.success;
+  if (!access.success) caps.accessReason = access.code === 9999 ? 'access-not-enabled' : access.code === 10000 ? 'no-permission' : 'unknown';
 
   return caps;
 }

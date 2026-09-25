@@ -24,6 +24,11 @@ export const SAVED_CLOUDFLARE_WORKERS_TOKEN_MASK = 'saved-cloudflare-workers-tok
 type JsonObject = Record<string, any>;
 type DeployProviderId = typeof VERCEL_PROVIDER_ID | typeof CLOUDFLARE_PAGES_PROVIDER_ID | typeof CLOUDFLARE_WORKERS_PROVIDER_ID;
 type DeployErrorDetails = JsonObject | string | undefined;
+type CloudflareWorkersAccessRule =
+  | { kind: 'emails'; emails: string[] }
+  | { kind: 'emailDomain'; emailDomain: string }
+  | { kind: 'self' }
+  | { kind: 'policy'; policyId: string };
 
 type DeployConfig = {
   token: string;
@@ -39,6 +44,7 @@ type DeployConfig = {
   redirectUri?: string | undefined;
   scopes?: string[] | undefined;
   bindings?: Array<{ type: string; name: string; bucketName?: string; databaseName?: string; id?: string }> | undefined;
+  access?: { enabled: boolean; rule?: CloudflareWorkersAccessRule } | undefined;
   customDomain?: { hostname: string; zoneId: string } | undefined;
 };
 type CloudflarePagesConfigHints = {
@@ -241,6 +247,28 @@ export function publicCloudflarePagesConfig(config: Partial<DeployConfig>) {
   return body;
 }
 
+function normalizeCloudflareWorkersAccessRule(rule: unknown): CloudflareWorkersAccessRule | undefined {
+  if (!rule || typeof rule !== 'object') return undefined;
+  const r = rule as JsonObject;
+  if (r.kind === 'emails') {
+    return {
+      kind: 'emails',
+      emails: Array.isArray(r.emails) ? r.emails.filter((e): e is string => typeof e === 'string') : [],
+    };
+  }
+  if (r.kind === 'emailDomain') return typeof r.emailDomain === 'string' ? { kind: 'emailDomain', emailDomain: r.emailDomain } : undefined;
+  if (r.kind === 'self') return { kind: 'self' };
+  if (r.kind === 'policy') return typeof r.policyId === 'string' ? { kind: 'policy', policyId: r.policyId } : undefined;
+  return undefined;
+}
+
+function normalizeCloudflareWorkersAccess(value: unknown): { enabled: boolean; rule?: CloudflareWorkersAccessRule } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const v = value as JsonObject;
+  const rule = normalizeCloudflareWorkersAccessRule(v.rule);
+  return rule === undefined ? { enabled: v.enabled === true } : { enabled: v.enabled === true, rule };
+}
+
 function normalizeCloudflareWorkersCustomDomain(value: unknown): { hostname: string; zoneId: string } | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as JsonObject;
@@ -266,6 +294,7 @@ export async function readCloudflareWorkersConfig(): Promise<DeployConfig> {
         ? parsed.scopes.filter((s: unknown): s is string => typeof s === 'string')
         : [],
       bindings: Array.isArray(parsed.bindings) ? parsed.bindings : [],
+      access: normalizeCloudflareWorkersAccess(parsed.access),
       customDomain: normalizeCloudflareWorkersCustomDomain(parsed.customDomain),
     };
   } catch (err) {
@@ -330,6 +359,7 @@ export async function writeCloudflareWorkersConfig(input: Partial<DeployConfig>)
     redirectUri: typeof input?.redirectUri === 'string' ? input.redirectUri.trim() : current.redirectUri,
     scopes: Array.isArray(input?.scopes) ? input.scopes : current.scopes,
     bindings: Array.isArray(input?.bindings) ? input.bindings : current.bindings,
+    access: input?.access !== undefined ? input.access : current.access,
     customDomain: input?.customDomain !== undefined ? input.customDomain : current.customDomain,
   };
   // In 'oauth' mode the API token is optional — the deploy uses the rotating
@@ -409,6 +439,7 @@ export function publicCloudflareWorkersConfig(config: Partial<DeployConfig>) {
     redirectUri: config?.redirectUri || '',
     scopes: Array.isArray(config?.scopes) ? config.scopes : [],
     bindings: config?.bindings || [],
+    access: config?.access || { enabled: false },
     customDomain: config?.customDomain,
     target: 'preview',
   };

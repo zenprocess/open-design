@@ -153,6 +153,9 @@ import {
   type WebDeployConfigResponse,
   type WebCloudflareAuthStatus,
   type WebCloudflarePagesDeploySelection,
+  type WebCloudflareWorkersAccess,
+  type WebCloudflareWorkersAccessRule,
+  type WebCloudflareWorkersAccessRuleKind,
   type WebCloudflareWorkersBinding,
   type WebCloudflareWorkersCapabilities,
   type WebCloudflareWorkersCustomDomain,
@@ -8020,6 +8023,11 @@ function HtmlViewer({
   const [cloudflareWorkersZones, setCloudflareWorkersZones] = useState<Array<{ id: string; name: string; status?: string }>>([]);
   const [cloudflareWorkersCustomDomainHostname, setCloudflareWorkersCustomDomainHostname] = useState('');
   const [cloudflareWorkersCustomDomainZoneId, setCloudflareWorkersCustomDomainZoneId] = useState('');
+  const [cloudflareWorkersAccessEnabled, setCloudflareWorkersAccessEnabled] = useState(false);
+  const [cloudflareWorkersAccessRuleKind, setCloudflareWorkersAccessRuleKind] = useState<WebCloudflareWorkersAccessRuleKind>('self');
+  const [cloudflareWorkersAccessEmails, setCloudflareWorkersAccessEmails] = useState('');
+  const [cloudflareWorkersAccessEmailDomain, setCloudflareWorkersAccessEmailDomain] = useState('');
+  const [cloudflareWorkersAccessPolicyId, setCloudflareWorkersAccessPolicyId] = useState('');
   const [cloudflareWorkersOAuthError, setCloudflareWorkersOAuthError] = useState<string | null>(null);
   const [cloudflareWorkersOAuthStatus, setCloudflareWorkersOAuthStatus] = useState<WebCloudflareAuthStatus | null>(null);
   const [cloudflareWorkersOAuthBusy, setCloudflareWorkersOAuthBusy] = useState<'idle' | 'starting' | 'awaiting' | 'disconnecting' | 'refreshing'>('idle');
@@ -9484,6 +9492,24 @@ function HtmlViewer({
     setCloudflareWorkersRedirectUri(matchingConfig?.redirectUri || '');
     setCloudflareWorkersCustomDomainHostname(matchingConfig?.customDomain?.hostname || '');
     setCloudflareWorkersCustomDomainZoneId(matchingConfig?.customDomain?.zoneId || '');
+    const cloudflareWorkersAccessConfig = matchingConfig?.access;
+    setCloudflareWorkersAccessEnabled(cloudflareWorkersAccessConfig?.enabled ?? false);
+    setCloudflareWorkersAccessRuleKind(cloudflareWorkersAccessConfig?.rule?.kind ?? 'self');
+    setCloudflareWorkersAccessEmails(
+      cloudflareWorkersAccessConfig?.rule?.kind === 'emails'
+        ? cloudflareWorkersAccessConfig.rule.emails.join(', ')
+        : '',
+    );
+    setCloudflareWorkersAccessEmailDomain(
+      cloudflareWorkersAccessConfig?.rule?.kind === 'emailDomain'
+        ? cloudflareWorkersAccessConfig.rule.emailDomain
+        : '',
+    );
+    setCloudflareWorkersAccessPolicyId(
+      cloudflareWorkersAccessConfig?.rule?.kind === 'policy'
+        ? cloudflareWorkersAccessConfig.rule.policyId
+        : '',
+    );
     setCloudflareWorkersOAuthError(null);
     setCloudflareWorkersCapabilities(null);
     setCloudflareWorkersCapabilitiesError(null);
@@ -9530,6 +9556,7 @@ function HtmlViewer({
         credentialMode: cloudflareWorkersCredentialMode,
         clientId: cloudflareWorkersClientId.trim(),
         redirectUri: cloudflareWorkersRedirectUri.trim(),
+        access: buildCloudflareWorkersAccessConfig(),
         bindings: cloudflareWorkersBindings,
         customDomain: buildCloudflareWorkersCustomDomain(),
       };
@@ -14629,6 +14656,30 @@ function HtmlViewer({
   }
 
 
+  function buildCloudflareWorkersAccessRule(): WebCloudflareWorkersAccessRule {
+    if (cloudflareWorkersAccessRuleKind === 'emails') {
+      return {
+        kind: 'emails',
+        emails: cloudflareWorkersAccessEmails
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      };
+    }
+    if (cloudflareWorkersAccessRuleKind === 'emailDomain') {
+      return { kind: 'emailDomain', emailDomain: cloudflareWorkersAccessEmailDomain.trim() };
+    }
+    if (cloudflareWorkersAccessRuleKind === 'policy') {
+      return { kind: 'policy', policyId: cloudflareWorkersAccessPolicyId.trim() };
+    }
+    return { kind: 'self' };
+  }
+
+  function buildCloudflareWorkersAccessConfig(): WebCloudflareWorkersAccess {
+    if (!cloudflareWorkersAccessEnabled) return { enabled: false };
+    return { enabled: true, rule: buildCloudflareWorkersAccessRule() };
+  }
+
   function buildCloudflareWorkersCustomDomain(): WebCloudflareWorkersCustomDomain | undefined {
     const hostname = cloudflareWorkersCustomDomainHostname.trim();
     const zoneId = cloudflareWorkersCustomDomainZoneId.trim();
@@ -14810,6 +14861,7 @@ function HtmlViewer({
         cloudflareWorkersClientId.trim() !== (deployConfig?.clientId || '') ||
         cloudflareWorkersRedirectUri.trim() !== (deployConfig?.redirectUri || '') ||
         JSON.stringify(cloudflareWorkersBindings) !== JSON.stringify(deployConfig?.bindings ?? []) ||
+        JSON.stringify(buildCloudflareWorkersAccessConfig()) !== JSON.stringify(deployConfig?.access ?? { enabled: false }) ||
         JSON.stringify(buildCloudflareWorkersCustomDomain() ?? null) !== JSON.stringify(deployConfig?.customDomain ?? null)
       );
       const needsConfigSave =
@@ -16188,6 +16240,7 @@ function HtmlViewer({
   const activeDeploymentProviderMetadata = (
     activeDeployment as WebDeploymentInfo & { providerMetadata?: WebDeployResultProviderMetadata }
   )?.providerMetadata;
+  const activeDeploymentAccessProtected = Boolean(activeDeploymentProviderMetadata?.accessProtected);
   const activeCloudflarePages = activeDeployment?.providerId === CLOUDFLARE_PAGES_PROVIDER_ID
     ? activeDeployment.cloudflarePages
     : undefined;
@@ -16337,8 +16390,15 @@ function HtmlViewer({
   };
   const cloudflareWorkersCapabilityStateLabel = (enabled: boolean) =>
     enabled ? t('fileViewer.cloudflareWorkersEnabled') : t('fileViewer.cloudflareWorkersDisabled');
+  const cloudflareWorkersAccessAvailable = cloudflareWorkersCapabilities?.access === true;
+  const cloudflareWorkersAccessUnavailableLabel = (reason?: string) => {
+    if (reason === 'access-not-enabled') return t('fileViewer.cloudflareWorkersReasonAccessNotEnabled');
+    if (reason === 'no-permission') return t('fileViewer.cloudflareWorkersReasonNoPermission');
+    return t('fileViewer.cloudflareWorkersAccessNotAvailable');
+  };
   const cloudflareWorkersReasonLabel = (reason: string) => {
     if (reason === 'r2-not-enabled') return t('fileViewer.cloudflareWorkersReasonR2NotEnabled');
+    if (reason === 'access-not-enabled') return t('fileViewer.cloudflareWorkersReasonAccessNotEnabled');
     if (reason === 'no-permission') return t('fileViewer.cloudflareWorkersReasonNoPermission');
     return t('fileViewer.cloudflareWorkersReasonUnknown');
   };
@@ -19191,6 +19251,58 @@ function HtmlViewer({
                           </label>
                         </div>
                       </div>
+                      <div className="deploy-bindings-block">
+                        <label className="deploy-scope-row" title={cloudflareWorkersAccessAvailable ? undefined : cloudflareWorkersAccessUnavailableLabel(cloudflareWorkersCapabilities?.accessReason)}>
+                          <input
+                            type="checkbox"
+                            data-testid="cfw-access-enabled"
+                            checked={cloudflareWorkersAccessEnabled}
+                            disabled={!cloudflareWorkersAccessAvailable}
+                            onChange={(e) => setCloudflareWorkersAccessEnabled(e.target.checked)}
+                          />
+                          <span>{t('fileViewer.cloudflareWorkersAccessEnabled')}</span>
+                        </label>
+                        {cloudflareWorkersAccessEnabled ? (
+                          <>
+                            <div className="deploy-field-grid single-field">
+                              <label>
+                                <span className="deploy-field-title">{t('fileViewer.cloudflareWorkersAccessRule')}</span>
+                                <select
+                                  data-testid="cfw-access-rule"
+                                  value={cloudflareWorkersAccessRuleKind}
+                                  onChange={(e) => setCloudflareWorkersAccessRuleKind(e.target.value as WebCloudflareWorkersAccessRuleKind)}
+                                >
+                                  <option value="emails">{t('fileViewer.cloudflareWorkersAccessRuleEmails')}</option>
+                                  <option value="emailDomain">{t('fileViewer.cloudflareWorkersAccessRuleEmailDomain')}</option>
+                                  <option value="self">{t('fileViewer.cloudflareWorkersAccessRuleSelf')}</option>
+                                  <option value="policy">{t('fileViewer.cloudflareWorkersAccessRulePolicy')}</option>
+                                </select>
+                              </label>
+                            </div>
+                            {cloudflareWorkersAccessRuleKind === 'emails' ? (
+                              <input
+                                value={cloudflareWorkersAccessEmails}
+                                placeholder={t('fileViewer.cloudflareWorkersAccessEmailsPlaceholder')}
+                                onChange={(e) => setCloudflareWorkersAccessEmails(e.target.value)}
+                              />
+                            ) : null}
+                            {cloudflareWorkersAccessRuleKind === 'emailDomain' ? (
+                              <input
+                                value={cloudflareWorkersAccessEmailDomain}
+                                placeholder={t('fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder')}
+                                onChange={(e) => setCloudflareWorkersAccessEmailDomain(e.target.value)}
+                              />
+                            ) : null}
+                            {cloudflareWorkersAccessRuleKind === 'policy' ? (
+                              <input
+                                value={cloudflareWorkersAccessPolicyId}
+                                placeholder={t('fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder')}
+                                onChange={(e) => setCloudflareWorkersAccessPolicyId(e.target.value)}
+                              />
+                            ) : null}
+                          </>
+                        ) : null}
+                      </div>
                       <div className="deploy-capabilities-block">
                         <span className="deploy-field-title-row">
                           <span className="deploy-field-title">{t('fileViewer.cloudflareWorkersCapabilities')}</span>
@@ -19226,6 +19338,10 @@ function HtmlViewer({
                             <li>
                               {t('fileViewer.cloudflareWorkersD1')}: {cloudflareWorkersCapabilityStateLabel(cloudflareWorkersCapabilities.d1)}
                               {cloudflareWorkersCapabilities.d1Reason ? ` · ${cloudflareWorkersReasonLabel(cloudflareWorkersCapabilities.d1Reason)}` : ''}
+                            </li>
+                            <li>
+                              {t('fileViewer.cloudflareWorkersAccess')}: {cloudflareWorkersCapabilityStateLabel(cloudflareWorkersCapabilities.access)}
+                              {cloudflareWorkersCapabilities.accessReason ? ` · ${cloudflareWorkersReasonLabel(cloudflareWorkersCapabilities.accessReason)}` : ''}
                             </li>
                           </ul>
                         ) : cloudflareWorkersCapabilitiesLoading ? (
@@ -19274,6 +19390,9 @@ function HtmlViewer({
                       <div className={`deploy-result-badge ${deployResultState(activeDeployment?.status)}`}>
                         {statusLabelFor(deployResultState(activeDeployment?.status))}
                       </div>
+                      {activeDeploymentAccessProtected ? (
+                        <span className="deploy-result-badge">{t('fileViewer.cloudflareWorkersAccessProtected')}</span>
+                      ) : null}
                     </div>
                     {deployResultState(activeDeployment?.status) === 'ready' && activeDeployedUrl ? (
                       <a

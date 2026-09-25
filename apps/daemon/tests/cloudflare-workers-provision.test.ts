@@ -281,27 +281,31 @@ describe('deployToCloudflareWorkers deploy log', () => {
       if (url.endsWith('/workers/subdomain')) return jsonResponse({ success: true, result: { subdomain: 'acct-test' } });
       if (url.includes('/subdomain')) return jsonResponse({ success: true, result: { enabled: true } });
       if (url.includes('/workers/scripts')) return jsonResponse({ success: true, result: [{ id: 'my-site', tag: 'tag-abc-123' }] });
+      if (url.includes('/access/identity_providers')) return jsonResponse({ success: true, result: [{ id: 'otp-123', type: 'onetimepin', name: 'One-time PIN login' }] });
+      if (url.includes('/access/apps')) return jsonResponse({ success: true, result: { id: 'app-123' } });
       if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: {} });
       return jsonResponse({ success: true, result: {} });
     });
     return { calls, fn };
   }
 
-  it('records assets, script, subdomain (and custom-domain when set) in order', async () => {
+  it('records assets, script, subdomain (and access-app / custom-domain when set) in order', async () => {
     const { fn } = happyFetch();
     vi.stubGlobal('fetch', fn);
     const out = await deployToCloudflareWorkers({
       ...base,
+      access: { enabled: true, rule: { kind: 'emails', emails: ['dev@example.com'] } },
       customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
     });
     const steps = stepsOf(out);
-    expect(steps.map((s) => s.name)).toEqual(['assets', 'script', 'subdomain', 'custom-domain']);
+    expect(steps.map((s) => s.name)).toEqual(['assets', 'script', 'access-app', 'subdomain', 'custom-domain']);
     expect(steps.find((s) => s.name === 'assets')?.detail).toBe('1');
+    expect(steps.find((s) => s.name === 'access-app')?.detail).toBe('app-123');
     expect(steps.find((s) => s.name === 'subdomain')?.detail).toBe('https://my-site.acct-test.workers.dev');
     expect(steps.find((s) => s.name === 'custom-domain')?.detail).toBe('app.example.com');
   });
 
-  it('omits the custom-domain step when it is unset', async () => {
+  it('omits access-app and custom-domain steps when those options are unset', async () => {
     const { fn } = happyFetch();
     vi.stubGlobal('fetch', fn);
     const out = await deployToCloudflareWorkers(base);

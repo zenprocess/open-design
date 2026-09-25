@@ -259,6 +259,11 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
               projectName: project?.name,
               target,
               customDomain: workersConfig?.customDomain,
+              access: workersConfig?.access,
+              priorAccessAppId:
+                typeof prior?.providerMetadata?.accessAppId === 'string'
+                  ? prior.providerMetadata.accessAppId
+                  : undefined,
             })
           : await deployToVercel({
               config: await readDeployConfig(VERCEL_PROVIDER_ID),

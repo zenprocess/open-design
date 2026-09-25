@@ -163,6 +163,16 @@ export type WebCloudflarePagesDeploySelection = CloudflarePagesDeploySelection;
 export type WebCloudflarePagesZonesResponse = CloudflarePagesZonesResponse;
 export type WebCloudflareWorkersBinding = CloudflareWorkersBinding & { databaseName?: string };
 export type WebCloudflareWorkersCapabilities = CloudflareWorkersCapabilities;
+export type WebCloudflareWorkersAccessRule =
+  | { kind: 'emails'; emails: string[] }
+  | { kind: 'emailDomain'; emailDomain: string }
+  | { kind: 'self' }
+  | { kind: 'policy'; policyId: string };
+export type WebCloudflareWorkersAccessRuleKind = WebCloudflareWorkersAccessRule['kind'];
+export type WebCloudflareWorkersAccess = {
+  enabled: boolean;
+  rule?: WebCloudflareWorkersAccessRule;
+};
 export type WebCloudflareDeployStep = {
   name: string;
   status: 'done' | 'error';
@@ -176,6 +186,9 @@ export type WebCloudflareDeployCheck = {
 };
 
 export type WebDeployResultProviderMetadata = {
+  accessProtected?: boolean;
+  accessAppId?: string;
+  createdByOpenDesign?: boolean;
   steps?: WebCloudflareDeployStep[];
   check?: WebCloudflareDeployCheck;
 };
