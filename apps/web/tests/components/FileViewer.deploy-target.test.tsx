@@ -295,6 +295,8 @@ function mockWorkersFetch(options: {
   onConfigPut?: (body: Record<string, unknown>) => void;
   onDeployBody?: (body: Record<string, unknown>) => void;
   deployResponse?: Record<string, unknown>;
+  /** Evaluated per request so a test can flip the daemon's OAuth status mid-flow. */
+  authStatus?: () => Record<string, unknown>;
 } = {}) {
   const baseConfig: Record<string, unknown> = {
     providerId: 'cloudflare-workers',
@@ -347,7 +349,7 @@ function mockWorkersFetch(options: {
       return new Response(JSON.stringify({ zones: options.zones ?? [] }), { status: 200 });
     }
     if (url === '/api/cloudflare/auth/status') {
-      return new Response(JSON.stringify({ connected: false }), { status: 200 });
+      return new Response(JSON.stringify(options.authStatus?.() ?? { connected: false }), { status: 200 });
     }
     if (url === '/api/cloudflare/oauth/start' && method === 'POST') {
       return new Response(JSON.stringify({
@@ -525,5 +527,108 @@ describe('FileViewer Workers deploy config (review regressions)', () => {
     expect(steps.querySelectorAll('li')).toHaveLength(2);
     expect(screen.getByText('Protected by Cloudflare Access')).toBeTruthy();
     expect(screen.getByText(/HTTP 503/)).toBeTruthy();
+  });
+
+  it('keeps deploy enabled on an expired OAuth token the daemon can refresh, and disables it when it cannot', async () => {
+    const oauthConfig = {
+      credentialMode: 'oauth',
+      clientId: 'client-1',
+      redirectUri: 'http://127.0.0.1:8976/callback',
+      tokenMask: '',
+    };
+    const expired = Date.now() - 60_000;
+
+    vi.stubGlobal('fetch', mockWorkersFetch({
+      config: oauthConfig,
+      authStatus: () => ({ connected: true, expiresAt: expired, savedAt: 1, refreshable: true }),
+    }));
+    await openWorkersDeployModal();
+    await screen.findByText('Token expired. Sign in again.');
+    const deploy = screen.getByTestId('cfw-deploy-button') as HTMLButtonElement;
+    await waitFor(() => {
+      expect(deploy.disabled).toBe(false);
+    });
+    cleanup();
+
+    vi.stubGlobal('fetch', mockWorkersFetch({
+      config: oauthConfig,
+      authStatus: () => ({ connected: true, expiresAt: expired, savedAt: 1, refreshable: false }),
+    }));
+    await openWorkersDeployModal();
+    await screen.findByText('Token expired. Sign in again.');
+    await waitFor(() => {
+      expect((screen.getByTestId('cfw-deploy-button') as HTMLButtonElement).disabled).toBe(true);
+    });
+  });
+
+  it('does not treat the pre-existing token as reconnect success; only a new savedAt stops the poll', async () => {
+    let status: Record<string, unknown> = { connected: true, expiresAt: Date.now() - 60_000, savedAt: 100, refreshable: false };
+    vi.stubGlobal('fetch', mockWorkersFetch({
+      config: {
+        credentialMode: 'oauth',
+        clientId: 'client-1',
+        redirectUri: 'http://127.0.0.1:8976/callback',
+        tokenMask: '',
+      },
+      authStatus: () => status,
+    }));
+    vi.stubGlobal('open', vi.fn(() => null));
+
+    await openWorkersDeployModal();
+    const reconnect = await screen.findByTestId('cfw-oauth-connect');
+    await waitFor(() => {
+      expect((reconnect as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(reconnect);
+    // The Reconnect button stays disabled for as long as the poll is awaiting.
+    await waitFor(() => {
+      expect((reconnect as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    // Tick one (2 s) sees the OLD record: still expired, still awaiting.
+    await new Promise((resolve) => setTimeout(resolve, 2600));
+    expect(screen.getByText('Token expired. Sign in again.')).toBeTruthy();
+    expect((screen.getByTestId('cfw-oauth-connect') as HTMLButtonElement).disabled).toBe(true);
+
+    // The new grant lands: a different savedAt is the success signal.
+    status = { connected: true, expiresAt: Date.now() + 3_600_000, savedAt: 200, refreshable: true };
+    await waitFor(() => {
+      expect(screen.queryByText('Token expired. Sign in again.')).toBeNull();
+    }, { timeout: 5000 });
+    expect(screen.queryByTestId('cfw-oauth-connect')).toBeNull();
+    expect((screen.getByTestId('cfw-deploy-button') as HTMLButtonElement).disabled).toBe(false);
+  }, 15_000);
+
+  it('keeps the form in OAuth mode when Refresh runs mid-connect and the stored config still says token', async () => {
+    vi.stubGlobal('fetch', mockWorkersFetch({
+      config: { credentialMode: 'token', clientId: 'client-1', redirectUri: 'http://127.0.0.1:8976/callback' },
+      authStatus: () => ({ connected: false }),
+    }));
+    vi.stubGlobal('open', vi.fn(() => null));
+
+    await openWorkersDeployModal();
+    const modeSelect = screen.getByRole('combobox', { name: /credential mode/i }) as HTMLSelectElement;
+    fireEvent.change(modeSelect, { target: { value: 'oauth' } });
+    const connect = await screen.findByTestId('cfw-oauth-connect');
+    await waitFor(() => {
+      expect((connect as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(connect);
+    await screen.findByText('Waiting for Cloudflare authorization…');
+
+    const configFetchesBefore = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => String(call[0]) === '/api/deploy/config?providerId=cloudflare-workers').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await waitFor(() => {
+      const configFetches = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
+        .filter((call) => String(call[0]) === '/api/deploy/config?providerId=cloudflare-workers').length;
+      expect(configFetches).toBeGreaterThan(configFetchesBefore);
+    });
+    // Still OAuth mode, still waiting: the daemon's not-yet-committed 'token'
+    // must not tear the OAuth surface down, and the Refresh button comes back
+    // because the poll is still armed.
+    await screen.findByRole('button', { name: 'Refresh status' });
+    expect((screen.getByRole('combobox', { name: /credential mode/i }) as HTMLSelectElement).value).toBe('oauth');
+    expect(screen.getByText('Waiting for Cloudflare authorization…')).toBeTruthy();
   });
 });
