@@ -629,6 +629,17 @@ export async function getCloudflareAccessToken(
   }
 }
 
+/**
+ * The email recorded on the stored Cloudflare OAuth token at connect time, or
+ * '' when none is stored (token mode, a record written before the email was
+ * captured, or a client that lacks `user-details.read`). The Access "only me"
+ * rule resolves from this before any upload; callers fall back to `GET /user`.
+ */
+export async function getCloudflareOAuthStoredEmail(): Promise<string> {
+  const current = await getCloudflareOAuthToken(cloudflareOAuthTokensDir());
+  return (current?.email ?? '').trim();
+}
+
 /** Run the read -> refresh -> persist sequence for a dataDir. The caller holds
  * the single-flight lock for this dataDir. */
 async function refreshCloudflareOAuthAccessToken(
@@ -677,6 +688,19 @@ async function refreshCloudflareOAuthAccessToken(
       refreshToken: current.refreshToken,
     });
   } catch (err) {
+    // A sibling process on the same data dir may have refreshed first. When
+    // Cloudflare rotated the refresh token, THIS call fails `invalid_grant`
+    // even though a fresh credential is already on disk — so re-read before
+    // declaring the grant dead. A newer, unexpired generation means the
+    // sibling won: adopt its token instead of demanding a reconnect.
+    const latest = await getCloudflareOAuthToken(dataDir);
+    if (
+      latest &&
+      (latest.generation ?? 0) > (current.generation ?? 0) &&
+      !isCloudflareOAuthTokenExpired(latest, Date.now(), CLOUDFLARE_OAUTH_EXPIRY_SKEW_MS)
+    ) {
+      return latest.accessToken;
+    }
     throw classifyCloudflareRefreshFailure(err);
   }
 
@@ -689,6 +713,7 @@ async function refreshCloudflareOAuthAccessToken(
   };
   if (current.redirectUri) stored.redirectUri = current.redirectUri;
   if (current.accountId) stored.accountId = current.accountId;
+  if (current.email) stored.email = current.email;
   if (refreshed.refresh_token) stored.refreshToken = refreshed.refresh_token;
   else if (current.refreshToken) stored.refreshToken = current.refreshToken;
   if (refreshed.scope) stored.scope = refreshed.scope;

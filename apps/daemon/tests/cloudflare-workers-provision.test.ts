@@ -48,7 +48,10 @@ function makeFetch(overrides: FetchOverrides = {}, calls: Call[]) {
     if (url.includes('/d1/database')) return jsonResponse(overrides.d1List ?? { success: true, result: [] });
     if (url.includes('/r2/buckets')) return jsonResponse(overrides.r2List ?? { success: true, result: { buckets: [] } });
     if (url.includes('/zones')) return jsonResponse(overrides.zones ?? { success: true, result: [] });
-    if (url.includes('/workers/domains')) return jsonResponse(overrides.domains ?? { success: true, result: {} });
+    if (url.includes('/workers/domains')) {
+      if (method === 'GET') return jsonResponse(overrides.domainsList ?? { success: true, result: [] });
+      return jsonResponse(overrides.domains ?? { success: true, result: {} });
+    }
     if (url.includes('assets-upload-session')) {
       return jsonResponse(overrides.session ?? { success: true, result: { jwt: 'SESS', buckets: [[cloudflareWorkersAssetHash(INDEX)]] } });
     }
@@ -366,8 +369,15 @@ describe('deployToCloudflareWorkers deploy log', () => {
       if (url.includes('/subdomain')) return jsonResponse({ success: true, result: { enabled: true } });
       if (url.includes('/workers/scripts')) return jsonResponse({ success: true, result: [{ id: 'my-site', tag: 'tag-abc-123' }] });
       if (url.includes('/access/identity_providers')) return jsonResponse({ success: true, result: [{ id: 'otp-123', type: 'onetimepin', name: 'One-time PIN login' }] });
-      if (url.includes('/access/apps')) return jsonResponse({ success: true, result: { id: 'app-123' } });
-      if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: {} });
+      if (url.includes('/access/apps')) {
+        // The app LIST (GET /access/apps) must be an array — a non-array now fails closed.
+        if (method === 'GET' && !/\/access\/apps\/[^/?]/.test(url)) return jsonResponse({ success: true, result: [] });
+        return jsonResponse({ success: true, result: { id: 'app-123' } });
+      }
+      if (url.includes('/workers/domains')) {
+        if ((init?.method || 'GET').toUpperCase() === 'GET') return jsonResponse({ success: true, result: [] });
+        return jsonResponse({ success: true, result: {} });
+      }
       return jsonResponse({ success: true, result: {} });
     });
     return { calls, fn };
@@ -419,6 +429,7 @@ describe('deployToCloudflareWorkers deploy log', () => {
         return jsonResponse({ success: true, result: { jwt: 'SESS', buckets: [[cloudflareWorkersAssetHash(INDEX)]] } });
       }
       if (url.includes('/workers/assets/upload')) return jsonResponse({ success: true, result: { jwt: 'COMPLETION' } });
+      if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: [] });
       if (url.endsWith('/workers/subdomain')) return jsonResponse({ success: true, result: { subdomain: 'acct-test' } });
       if (url.includes('/subdomain')) return jsonResponse({ success: true, result: { enabled: true } });
       return jsonResponse({ success: true, result: {} });
@@ -437,6 +448,7 @@ describe('deployToCloudflareWorkers deploy log', () => {
         return jsonResponse({ success: true, result: { jwt: 'SESS', buckets: [[cloudflareWorkersAssetHash(INDEX)]] } });
       }
       if (url.includes('/workers/assets/upload')) return jsonResponse({ success: true, result: { jwt: 'COMPLETION' } });
+      if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: [] });
       if (url.endsWith('/workers/subdomain')) return jsonResponse({ success: true, result: { subdomain: 'acct-test' } });
       // script PUT fails
       return jsonResponse({ success: false, errors: [{ message: 'script upload failed' }] }, 400);

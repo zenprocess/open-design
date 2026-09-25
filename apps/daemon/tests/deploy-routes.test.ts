@@ -1688,6 +1688,7 @@ describe('deploy provider routes', () => {
         if (method === 'HEAD') return new Response('', { status: 503 });
         if (url.endsWith('/workers/subdomain')) return json({ success: true, result: { subdomain: 'acct-test' } });
         if (url.includes('assets-upload-session')) return json({ success: true, result: { jwt: 'SESS', buckets: [] } });
+        if (method === 'GET' && url.includes('/workers/domains')) return json({ success: true, result: [] });
         return json({ success: true, result: {} });
       });
       vi.stubGlobal('fetch', fetchMock);
@@ -1767,6 +1768,7 @@ describe('deploy provider routes', () => {
         }
         if (url.endsWith('/workers/subdomain')) return json({ success: true, result: { subdomain: 'acct-test' } });
         if (url.includes('assets-upload-session')) return json({ success: true, result: { jwt: 'SESS', buckets: [] } });
+        if (method === 'GET' && url.includes('/workers/domains')) return json({ success: true, result: [] });
         if (method === 'POST' && url.endsWith('/workers/scripts/access-orphan/subdomain')) {
           if (subdomainEnableFails) {
             subdomainEnableFails = false;
@@ -1866,6 +1868,7 @@ describe('deploy provider routes', () => {
           return json({ success: true, result: { subdomain: 'acct-test' } });
         }
         if (url.includes('assets-upload-session')) return json({ success: true, result: { jwt: 'SESS', buckets: [] } });
+        if (method === 'GET' && url.includes('/workers/domains')) return json({ success: true, result: [] });
         if (method === 'PUT' && url.endsWith('/workers/scripts/shared-script')) {
           scriptPuts += 1;
           return json({ success: true, result: {} });
@@ -1934,6 +1937,7 @@ describe('deploy provider routes', () => {
           return json({ success: true, result: { subdomain: 'acct-test' } });
         }
         if (url.includes('assets-upload-session')) return json({ success: true, result: { jwt: 'SESS', buckets: [] } });
+        if (method === 'GET' && url.includes('/workers/domains')) return json({ success: true, result: [] });
         if (method === 'PUT' && url.endsWith('/workers/scripts/single-flight')) {
           scriptPuts += 1;
           return json({ success: true, result: {} });

@@ -153,6 +153,57 @@ describe('cloudflare-oauth routes', () => {
     }
   });
 
+  it('records the connected account email at connect time and reports it on auth/status', async () => {
+    const dataDir = cloudflareOAuthTokensDir();
+    const realFetch = globalThis.fetch;
+    let userCalls = 0;
+    vi.stubGlobal('fetch', async (input: unknown, init?: unknown) => {
+      const url = String(input);
+      if (url.includes('oauth2/token')) {
+        return new Response(
+          JSON.stringify({ access_token: 'acc-connect', token_type: 'Bearer', refresh_token: 'ref', expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/client/v4/user')) {
+        userCalls += 1;
+        // The email lookup must run with the token that just authorized.
+        const auth = ((init as RequestInit | undefined)?.headers as Record<string, string> | undefined)?.Authorization;
+        expect(auth).toBe('Bearer acc-connect');
+        return new Response(JSON.stringify({ success: true, result: { email: 'me@example.com' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return realFetch(input as never, init as never);
+    });
+    try {
+      const startResp = await fetch(`${app.baseUrl}/api/cloudflare/oauth/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ clientId: 'client-abc', redirectUri: 'http://127.0.0.1:56122/callback' }),
+      });
+      expect(startResp.status).toBe(200);
+      const { state } = (await startResp.json()) as { state: string };
+      const completeResp = await fetch(`${app.baseUrl}/api/cloudflare/oauth/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state, code: 'AUTHCODE' }),
+      });
+      expect(completeResp.status).toBe(200);
+      expect(userCalls).toBe(1);
+      expect(await getCloudflareOAuthToken(dataDir)).toMatchObject({ accessToken: 'acc-connect', email: 'me@example.com' });
+      const status = await (await fetch(`${app.baseUrl}/api/cloudflare/auth/status`)).json() as Record<string, unknown>;
+      expect(status).toMatchObject({ connected: true, email: 'me@example.com' });
+    } finally {
+      vi.unstubAllGlobals();
+      await clearCloudflareOAuthToken(dataDir);
+      // The completed connect committed OAuth mode into the deploy config; the
+      // later "/start that fails" case needs that path to be absent again.
+      await rm(deployConfigPath(CLOUDFLARE_WORKERS_PROVIDER_ID), { force: true });
+    }
+  });
+
   it('auth/status reports refreshable + savedAt so the client can tell an expiry from a reconnect', async () => {
     const dataDir = cloudflareOAuthTokensDir();
     try {

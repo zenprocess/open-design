@@ -37,6 +37,7 @@ import {
 import {
   beginCloudflareAuth,
   completeCloudflareAuth,
+  fetchCloudflareUserEmail,
   cloudflareRedirectUri,
   CLOUDFLARE_OAUTH_SCOPES,
   type CompleteCloudflareAuthResult,
@@ -125,10 +126,18 @@ export function registerCloudflareRoutes(
   const persistCredential = async (
     result: CompleteCloudflareAuthResult,
     attemptGeneration: number,
+    fetchImpl: typeof fetch,
   ): Promise<boolean> => {
     const cfg = await readCloudflareWorkersConfig();
     const dataDir = cloudflareOAuthTokensDir();
     const stored = buildStoredCloudflareToken(result, cfg);
+    // Capture the account email NOW, with the token that just authorized, so
+    // the Access "only me" rule resolves from the stored record at deploy time
+    // instead of discovering after the assets upload that GET /user is not
+    // permitted. Best-effort: a client without `user-details.read` still
+    // connects; the deploy then falls back to a live lookup and fails closed.
+    const email = await fetchCloudflareUserEmail(result.access_token, fetchImpl);
+    if (email) stored.email = email;
     return runCredentialMutation(async () => {
       if (attemptGeneration !== oauthAttemptGeneration) return false;
       const prev = await getCloudflareOAuthToken(dataDir);
@@ -197,7 +206,11 @@ export function registerCloudflareRoutes(
         console.warn('[cloudflare-oauth] attempt superseded; discarding token');
         return false;
       }
-      const persisted = await persistCredential(tokenResp, attemptGeneration);
+      const persisted = await persistCredential(
+        tokenResp,
+        attemptGeneration,
+        fetchWithRequestInit(proxyDispatcher.requestInit),
+      );
       if (!persisted) {
         console.warn('[cloudflare-oauth] attempt superseded; discarding token');
         return false;
@@ -328,7 +341,11 @@ export function registerCloudflareRoutes(
           .status(409)
           .json({ error: 'Cloudflare OAuth attempt was cancelled or superseded — restart the connection.' });
       }
-      const persisted = await persistCredential(tokenResp, attemptGeneration);
+      const persisted = await persistCredential(
+        tokenResp,
+        attemptGeneration,
+        fetchWithRequestInit(proxyDispatcher.requestInit),
+      );
       if (!persisted) {
         console.warn('[cloudflare-oauth] attempt superseded; discarding token');
         return res
@@ -370,6 +387,7 @@ export function registerCloudflareRoutes(
         refreshable: Boolean(tok.refreshToken),
         scope: tok.scope ?? null,
         accountId: tok.accountId ?? null,
+        email: tok.email ?? null,
         savedAt: tok.savedAt,
         listening: activeListener !== null,
       });

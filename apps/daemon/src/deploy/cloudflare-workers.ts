@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { CLOUDFLARE_WORKERS_PROVIDER_ID, DeployError, getCloudflareAccessToken, isCloudflareAccessRedirect, normalizeCloudflareWorkersBindings } from '../deploy.js';
+import { CLOUDFLARE_WORKERS_PROVIDER_ID, DeployError, getCloudflareAccessToken, getCloudflareOAuthStoredEmail, isCloudflareAccessRedirect, normalizeCloudflareWorkersBindings } from '../deploy.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -439,6 +439,15 @@ function accessRuleInclude(rule: CloudflareWorkersAccessRule, selfEmail: string)
   }
 }
 
+function selfEmailUnresolvedError(): DeployError {
+  return new DeployError(
+    'Could not resolve the connected Cloudflare account email for "only me" access. Reconnect Cloudflare (the connection needs the "User Details Read" permission) or specify a specific email instead.',
+    400,
+    undefined,
+    'CFW_ACCESS_SELF_EMAIL',
+  );
+}
+
 async function resolveCloudflareSelfEmail(token: string): Promise<string> {
   const resp = await fetch(CLOUDFLARE_API + '/user', { headers: cloudflareHeaders(token) });
   const json = await readCloudflareJson(resp);
@@ -509,8 +518,11 @@ async function findCloudflareAccessAppByWorker(config: WorkersDeployConfig, work
     const json = await readCloudflareJson(resp);
     // A genuine list failure (permission/5xx) must fail closed, not be conflated
     // with "zero apps" — otherwise the caller escalates to a duplicate POST.
-    if (!resp.ok) throw cloudflareError(json, resp.status, 'Cloudflare Access apps list failed.');
-    if (json.success !== true || !Array.isArray(json.result)) return null;
+    // That includes a 200 whose envelope says `success: false` or carries no
+    // array: treating it as an empty list is the same fail-open path.
+    if (!resp.ok || json.success !== true || !Array.isArray(json.result)) {
+      throw cloudflareError(json, resp.ok ? 502 : resp.status, 'Cloudflare Access apps list failed.');
+    }
     const apps = json.result as JsonObject[];
     const match = apps.find((a) => {
       const dests = Array.isArray(a?.destinations) ? (a.destinations as JsonObject[]) : [];
@@ -522,6 +534,48 @@ async function findCloudflareAccessAppByWorker(config: WorkersDeployConfig, work
   }
 }
 
+function normalizeHostname(hostname: string): string {
+  return hostname.trim().toLowerCase().replace(/\.$/, '');
+}
+
+function uniqueHostnames(hostnames: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const raw of hostnames) {
+    const hostname = normalizeHostname(raw);
+    if (hostname && !out.includes(hostname)) out.push(hostname);
+  }
+  return out;
+}
+
+export type CloudflareWorkerAttachedDomain = { id: string; hostname: string };
+
+/** The custom hostnames Cloudflare ACTUALLY routes to a script (the account's
+ * Workers custom domains filtered to `service=<scriptName>`). Strict: a list
+ * failure throws, because every caller derives the Access perimeter from this
+ * answer and an empty fallback would silently leave a routed hostname public. */
+export async function listCloudflareWorkerDomainsForScript(
+  config: WorkersDeployConfig,
+  scriptName: string,
+): Promise<CloudflareWorkerAttachedDomain[]> {
+  const resp = await fetchWithRetry(
+    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/workers/domains?service=' + encodeURIComponent(scriptName),
+    { method: 'GET', headers: cloudflareHeaders(config.token) },
+  );
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success !== true || !Array.isArray(json.result)) {
+    throw cloudflareError(json, resp.ok ? 502 : resp.status, 'Cloudflare Workers custom domains list failed.');
+  }
+  return (json.result as JsonObject[])
+    // The `service` filter is a server-side hint; re-check it here so a
+    // hostname routed to ANOTHER script can never be detached by this deploy.
+    .filter((domain) => domain?.service === scriptName)
+    .map((domain) => ({
+      id: domain?.id !== undefined && domain?.id !== null ? String(domain.id) : '',
+      hostname: typeof domain?.hostname === 'string' ? normalizeHostname(domain.hostname) : '',
+    }))
+    .filter((domain) => domain.id.length > 0 && domain.hostname.length > 0);
+}
+
 async function createCloudflareAccessApp(
   config: WorkersDeployConfig,
   input: {
@@ -529,18 +583,21 @@ async function createCloudflareAccessApp(
     rule: CloudflareWorkersAccessRule;
     includePreview: boolean;
     workerId?: string;
-    customDomain?: { hostname: string; zoneId: string } | undefined;
+    /** Every zone hostname the Access app must cover as a `public`
+     * destination: the configured custom domain PLUS every hostname Cloudflare
+     * currently routes to the script (see listCloudflareWorkerDomainsForScript). */
+    publicHostnames?: readonly string[] | undefined;
+    /** Pre-resolved "only me" email (from the stored OAuth record); when
+     * absent the live `GET /user` lookup runs here. */
+    selfEmail?: string | undefined;
     priorAccessAppId?: string | undefined;
   },
 ): Promise<{ appId: string; workerId: string }> {
-  const selfEmail = input.rule.kind === 'self' ? await resolveCloudflareSelfEmail(config.token) : '';
+  const selfEmail = input.rule.kind === 'self'
+    ? (input.selfEmail || await resolveCloudflareSelfEmail(config.token))
+    : '';
   if (input.rule.kind === 'self' && !selfEmail) {
-    throw new DeployError(
-      'Could not resolve the connected Cloudflare account email for "only me" access. Specify a specific email instead.',
-      400,
-      undefined,
-      'CFW_ACCESS_SELF_EMAIL',
-    );
+    throw selfEmailUnresolvedError();
   }
   // Access destinations key on the Worker's tag (a UUID from GET /workers/scripts),
   // not its script name — the name is rejected with "worker_id ... is invalid".
@@ -557,8 +614,12 @@ async function createCloudflareAccessApp(
   if (input.includePreview) destinations.push({ type: 'preview_worker', worker_id: workerId });
   // A worker-tag destination covers workers.dev + preview URLs only. A custom
   // hostname is a zone hostname and needs its own `public` destination, or the
-  // site is served unprotected on the custom domain.
-  if (input.customDomain?.hostname) destinations.push({ type: 'public', uri: input.customDomain.hostname });
+  // site is served unprotected on the custom domain. Every hostname Cloudflare
+  // routes to the script is covered — not just the configured one — so a
+  // domain a previous deploy attached can never sit outside the perimeter.
+  for (const hostname of uniqueHostnames(input.publicHostnames ?? [])) {
+    destinations.push({ type: 'public', uri: hostname });
+  }
   const ownedAppName = cloudflareAccessAppNameForScript(input.scriptName);
   const body: JsonObject = {
     name: ownedAppName,
@@ -770,6 +831,17 @@ export async function deployToCloudflareWorkers(input: {
     credentialMode: config.credentialMode,
     bindings: validatedBindings,
   };
+  // Resolve the "only me" email BEFORE any upload. In OAuth mode the email
+  // captured at connect time is authoritative (`GET /user` needs a scope an
+  // older connection may never have granted); token mode and records written
+  // before the capture existed fall back to the live lookup. Either way an
+  // unresolvable rule fails here, not after the assets are already uploaded.
+  let selfEmail = '';
+  if (accessOn && access!.rule!.kind === 'self') {
+    if (config.credentialMode === 'oauth') selfEmail = await getCloudflareOAuthStoredEmail();
+    if (!selfEmail) selfEmail = await resolveCloudflareSelfEmail(token);
+    if (!selfEmail) throw selfEmailUnresolvedError();
+  }
   // The ensure calls ARE the capability check: they succeed only when R2/D1 are
   // enabled and the token can reach them. (A separate unretried probe after
   // them used to flip a fresh success into CFW_R2_UNAVAILABLE on one 429.)
@@ -807,6 +879,15 @@ export async function deployToCloudflareWorkers(input: {
       }
       const subdomain = await readAccountSubdomain(cfg);
       if (!subdomain) throw noWorkersDevSubdomainError();
+      // The Access app is shared with production and its PUT replaces every
+      // destination, so a preview deploy must keep covering each hostname
+      // Cloudflare routes to the script (strict list — see production below).
+      const previewPublicHostnames = accessOn
+        ? uniqueHostnames([
+            ...(customDomain ? [customDomain.hostname] : []),
+            ...(await listCloudflareWorkerDomainsForScript(cfg, scriptName)).map((domain) => domain.hostname),
+          ])
+        : [];
       const session = await startAssetsUploadSession(cfg, scriptName, manifest);
       const completionJwt = await uploadAssetBuckets(cfg, session.jwt, session.buckets, hashToFile);
       steps.push({ name: 'assets', status: 'done', detail: String(assetFiles.length) });
@@ -819,7 +900,8 @@ export async function deployToCloudflareWorkers(input: {
           rule: access!.rule!,
           includePreview: true,
           workerId,
-          customDomain,
+          publicHostnames: previewPublicHostnames,
+          selfEmail,
           priorAccessAppId,
         });
         metadata.accessProtected = true;
@@ -858,6 +940,21 @@ export async function deployToCloudflareWorkers(input: {
     // Worker tag (needed for the Access destination).
     const subdomain = await readAccountSubdomain(cfg);
     if (!subdomain && !customDomain) throw noWorkersDevSubdomainError();
+    // The Access perimeter is derived from what Cloudflare ACTUALLY routes to
+    // this script, not from the configured domain alone: a hostname attached by
+    // an earlier deploy (config since cleared or changed) still serves the
+    // Worker. Every attached hostname is covered by the Access app for the
+    // whole deploy, and any hostname that is not the configured one is
+    // detached once the live script is in place. The list is strict — a
+    // failure here must not silently shrink the perimeter — and runs before
+    // the upload so nothing is spent on a deploy that cannot be reconciled.
+    const attachedDomains = await listCloudflareWorkerDomainsForScript(cfg, scriptName);
+    const configuredHostname = customDomain ? normalizeHostname(customDomain.hostname) : '';
+    const staleDomains = attachedDomains.filter((domain) => domain.hostname !== configuredHostname);
+    const publicHostnames = uniqueHostnames([
+      ...(configuredHostname ? [configuredHostname] : []),
+      ...attachedDomains.map((domain) => domain.hostname),
+    ]);
     const session = await startAssetsUploadSession(cfg, scriptName, manifest);
     const completionJwt = await uploadAssetBuckets(cfg, session.jwt, session.buckets, hashToFile);
     steps.push({ name: 'assets', status: 'done', detail: String(assetFiles.length) });
@@ -870,7 +967,7 @@ export async function deployToCloudflareWorkers(input: {
     let workerId = accessOn || priorAccessAppId ? await getCloudflareWorkerTag(cfg, scriptName) : '';
     let accessAppId = '';
     if (accessOn && workerId) {
-      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, workerId, customDomain, priorAccessAppId });
+      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, workerId, publicHostnames, selfEmail, priorAccessAppId });
       accessAppId = app.appId;
       metadata.accessProtected = true;
       metadata.accessAppId = app.appId;
@@ -882,7 +979,7 @@ export async function deployToCloudflareWorkers(input: {
     steps.push({ name: 'script', status: 'done' });
     if (accessOn && !accessAppId) {
       // First deploy: the Worker now exists, so its tag is resolvable.
-      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, customDomain, priorAccessAppId });
+      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, publicHostnames, selfEmail, priorAccessAppId });
       accessAppId = app.appId;
       workerId = app.workerId;
       metadata.accessProtected = true;
@@ -909,6 +1006,14 @@ export async function deployToCloudflareWorkers(input: {
         ? { id: domainId, hostname: customDomain.hostname, url: customUrl }
         : { hostname: customDomain.hostname, url: customUrl };
       steps.push({ name: 'custom-domain', status: 'done', detail: customDomain.hostname });
+    }
+    // Detach every hostname Cloudflare routes to the script that the config no
+    // longer names. Until this point each of them was covered by the Access
+    // app (when Access is on); a detach failure throws, so the deploy is never
+    // reported ready with a hostname the user dropped still serving the site.
+    for (const stale of staleDomains) {
+      await detachCloudflareWorkerDomain(cfg, stale.id);
+      steps.push({ name: 'custom-domain-detach', status: 'done', detail: stale.hostname });
     }
     const publicUrls = [url, ...(customDomain && url !== 'https://' + customDomain.hostname ? ['https://' + customDomain.hostname] : [])];
     if (accessOn) {

@@ -256,6 +256,10 @@ describe('deployToCloudflareWorkers', () => {
       if (url.includes('/workers/scripts?')) {
         return jsonResponse(overrides.scripts ?? SCRIPTS_LIST);
       }
+      if (url.includes('/workers/domains')) {
+        if ((init?.method || 'GET').toUpperCase() === 'GET') return jsonResponse(overrides.domainsList ?? { success: true, result: [] });
+        return jsonResponse(overrides.domains ?? { success: true, result: { id: 'dom-1' } });
+      }
       if (url.endsWith('/workers/subdomain')) {
         return jsonResponse(overrides.subdomainGet ?? { success: true, result: { subdomain: 'acct-test' } });
       }
@@ -278,20 +282,22 @@ describe('deployToCloudflareWorkers', () => {
     vi.stubGlobal('fetch', fn);
     const out = await deployToCloudflareWorkers(base);
     const urls = calls.map((c) => c[0]);
-    // The account subdomain is resolved BEFORE anything is uploaded, so an
-    // account without workers.dev fails before a new version goes live.
+    // The account subdomain and the script's attached custom domains are
+    // resolved BEFORE anything is uploaded, so an account without workers.dev
+    // (or an unreconcilable domain set) fails before a new version goes live.
     expect(urls[0]).toContain('/workers/subdomain');
-    expect(urls[1]).toContain('assets-upload-session');
-    expect(urls[2]).toContain('/workers/assets/upload');
-    expect(urls[3]).toContain('/workers/scripts/my-site');
-    expect(urls[4]).toContain('/workers/scripts/my-site/subdomain');
+    expect(urls[1]).toContain('/workers/domains?service=my-site');
+    expect(urls[2]).toContain('assets-upload-session');
+    expect(urls[3]).toContain('/workers/assets/upload');
+    expect(urls[4]).toContain('/workers/scripts/my-site');
+    expect(urls[5]).toContain('/workers/scripts/my-site/subdomain');
     expect(out.url).toBe('https://my-site.acct-test.workers.dev');
 
-    const uploadCall = calls[2]!;
+    const uploadCall = calls[3]!;
     expect(uploadCall[1]?.headers).toMatchObject({ Authorization: 'Bearer SESS' });
     expect(uploadCall[1]?.headers).not.toMatchObject({ Authorization: 'Bearer tok-secret' });
 
-    const meta = await metadataOf(calls[3]!);
+    const meta = await metadataOf(calls[4]!);
     expect(meta.bindings).toEqual([{ name: 'ASSETS', type: 'assets' }]);
     expect(meta.keep_bindings).toEqual(['secret_text', 'secret_key']);
     expect(meta.assets).toEqual({ jwt: 'COMPLETION' });
@@ -345,6 +351,7 @@ describe('deployToCloudflareWorkers', () => {
 
   it('maps 403 to PROVIDER_FORBIDDEN and never leaks the token', async () => {
     const fn403 = vi.fn(async (url: string) => {
+      if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: [] });
       if (url.endsWith('/workers/subdomain')) return jsonResponse({ success: true, result: { subdomain: 'acct-test' } });
       if (url.includes('assets-upload-session')) return jsonResponse({ success: false, errors: [{ message: 'forbidden' }] }, 403);
       return jsonResponse({ success: true, result: {} });
@@ -363,6 +370,7 @@ describe('deployToCloudflareWorkers', () => {
 
   it('maps 413 to CFW_ASSET_TOO_LARGE', async () => {
     const fn = vi.fn(async (url: string) => {
+      if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: [] });
       if (url.endsWith('/workers/subdomain')) return jsonResponse({ success: true, result: { subdomain: 'acct-test' } });
       if (url.includes('assets-upload-session')) return jsonResponse({ success: false, errors: [{ message: 'too large' }] }, 413);
       return jsonResponse({ success: true, result: {} });
@@ -381,6 +389,7 @@ describe('deployToCloudflareWorkers', () => {
         return jsonResponse({ success: true, result: { jwt: 'SESS', buckets: [[h]] } });
       }
       if (url.includes('/workers/assets/upload')) return jsonResponse({ success: true, result: { jwt: 'COMPLETION' } });
+      if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: [] });
       if (url.endsWith('/workers/subdomain')) return jsonResponse({ success: true, result: { subdomain: 'acct-test' } });
       if (url.includes('/subdomain')) return jsonResponse({ success: true, result: { enabled: true } });
       return jsonResponse({ success: true, result: {} });
@@ -391,6 +400,7 @@ describe('deployToCloudflareWorkers', () => {
 
     let badCalls = 0;
     const fn400 = vi.fn(async (url: string) => {
+      if (url.includes('/workers/domains')) return jsonResponse({ success: true, result: [] });
       if (url.endsWith('/workers/subdomain')) return jsonResponse({ success: true, result: { subdomain: 'acct-test' } });
       if (url.includes('assets-upload-session')) { badCalls += 1; return jsonResponse({ success: false, errors: [{ message: 'bad' }] }, 400); }
       return jsonResponse({ success: true, result: {} });
