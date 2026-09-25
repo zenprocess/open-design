@@ -117,7 +117,7 @@ describe('cloudflare-workers config', () => {
     }
   });
 
-  it('rejects an Access rule the read path would drop, instead of persisting it and deploying public', async () => {
+  it('rejects an empty or invalid Access rule at write time instead of persisting it and deploying public', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'od-workers-config-'));
     const prior = process.env.OD_USER_STATE_DIR;
     process.env.OD_USER_STATE_DIR = dir;

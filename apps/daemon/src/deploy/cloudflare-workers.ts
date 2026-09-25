@@ -584,13 +584,17 @@ async function createCloudflareAccessApp(
     includePreview: boolean;
     workerId?: string;
     /** Every zone hostname the Access app must cover as a `public`
-     * destination: the configured custom domain PLUS every hostname Cloudflare
-     * currently routes to the script (see listCloudflareWorkerDomainsForScript). */
+     * destination, in addition to the worker/preview_worker tag destinations.
+     * Callers decide the exact set per phase: the pre-PUT create covers the
+     * currently-routed hostnames, the post-attach reconcile the newly-routed set. */
     publicHostnames?: readonly string[] | undefined;
     /** Pre-resolved "only me" email (from the stored OAuth record); when
      * absent the live `GET /user` lookup runs here. */
     selfEmail?: string | undefined;
     priorAccessAppId?: string | undefined;
+    /** When set, PUT directly to this app id and skip the find-by-tag lookup and
+     * the foreign-ownership check (the caller already owns the app). */
+    knownAppId?: string | undefined;
   },
 ): Promise<{ appId: string; workerId: string }> {
   const selfEmail = input.rule.kind === 'self'
@@ -639,8 +643,8 @@ async function createCloudflareAccessApp(
     }
     body.policies = [{ name: 'Allow', decision: 'allow', include, precedence: 1 }];
   }
-  const existing = await findCloudflareAccessAppByWorker(config, workerId);
-  const existingId = existing && typeof existing.id === 'string' ? existing.id : '';
+  const existing = input.knownAppId ? null : await findCloudflareAccessAppByWorker(config, workerId);
+  const existingId = input.knownAppId || (existing && typeof existing.id === 'string' ? existing.id : '');
   const existingName = existing && typeof existing.name === 'string' ? existing.name : '';
   // Only replace an app we created: the id recorded by our previous deploy, or
   // an app carrying our own `<script> (OpenDesign)` name — a deploy that created
@@ -648,9 +652,9 @@ async function createCloudflareAccessApp(
   // behind, and must be adopted rather than locking the user out of their own
   // app. A user-managed Access app that claims this Worker must not be
   // overwritten with our OTP + email rule and later deleted when Access is
-  // switched off.
+  // switched off. knownAppId callers skip this check — they pin the id they own.
   const adoptable = existingId !== '' && existingName === ownedAppName;
-  if (existingId && existingId !== input.priorAccessAppId && !adoptable) {
+  if (!input.knownAppId && existingId && existingId !== input.priorAccessAppId && !adoptable) {
     const name = typeof existing?.name === 'string' ? existing.name : existingId;
     throw new DeployError(
       'Cloudflare Access app "' + name + '" already protects this Worker but was not created by OpenDesign. Remove it or turn off OpenDesign Access to continue.',
@@ -1009,6 +1013,23 @@ export async function deployToCloudflareWorkers(input: {
         ? { id: domainId, hostname: customDomain.hostname, url: customUrl }
         : { hostname: customDomain.hostname, url: customUrl };
       steps.push({ name: 'custom-domain', status: 'done', detail: customDomain.hostname });
+      // The attach makes the custom hostname live immediately. When it was not
+      // already routed, close the Access perimeter before anything can fail:
+      // cover everything routed at this instant (configured + still-attached
+      // stale) so a later detach failure can never leave the new hostname public.
+      const configuredAlreadyAttached = attachedDomains.some((domain) => domain.hostname === configuredHostname);
+      if (accessOn && accessAppId && !configuredAlreadyAttached) {
+        const coveringPublicHostnames = [configuredHostname, ...staleDomains.map((domain) => domain.hostname)];
+        await createCloudflareAccessApp(cfg, {
+          scriptName,
+          rule: access!.rule!,
+          includePreview: true,
+          workerId,
+          publicHostnames: coveringPublicHostnames,
+          selfEmail,
+          knownAppId: accessAppId,
+        });
+      }
     }
     // Detach every hostname Cloudflare routes to the script that the config no
     // longer names. Until this point each of them was covered by the Access
@@ -1018,15 +1039,11 @@ export async function deployToCloudflareWorkers(input: {
       await detachCloudflareWorkerDomain(cfg, stale.id);
       steps.push({ name: 'custom-domain-detach', status: 'done', detail: stale.hostname });
     }
-    // Final reconcile: after attach + detach the hostnames Cloudflare routes here
-    // are exactly [configuredHostname] (or none, with no custom domain). The
-    // pre-PUT app covered the pre-attach set, so re-PUT it now to drop any
-    // detached stale hostname and pick up the newly attached configured one.
-    // createCloudflareAccessApp is idempotent (finds by tag and PUTs in place).
-    // Skipped when neither a custom domain was attached nor a stale domain
-    // detached — the pre-PUT app already covers the script exactly, and an extra
-    // PUT would only churn Cloudflare.
-    if (accessOn && accessAppId && (customDomain || staleDomains.length > 0)) {
+    // After detach, drop the now-unrouted stale hostnames from the app. Only
+    // needed when something was actually detached — a steady-state redeploy
+    // (already attached, no stale) is covered exactly by the pre-PUT app and
+    // needs no extra PUT.
+    if (accessOn && accessAppId && staleDomains.length > 0) {
       const finalPublicHostnames = configuredHostname ? [configuredHostname] : [];
       await createCloudflareAccessApp(cfg, {
         scriptName,
@@ -1035,7 +1052,7 @@ export async function deployToCloudflareWorkers(input: {
         workerId,
         publicHostnames: finalPublicHostnames,
         selfEmail,
-        priorAccessAppId: accessAppId,
+        knownAppId: accessAppId,
       });
     }
     const publicUrls = [url, ...(customDomain && url !== 'https://' + customDomain.hostname ? ['https://' + customDomain.hostname] : [])];

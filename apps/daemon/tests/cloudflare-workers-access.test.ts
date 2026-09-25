@@ -208,7 +208,7 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     // The pre-PUT app must NOT claim the custom hostname before it is attached.
     const createBody = JSON.parse(calls[createPos]![1]?.body as string) as { destinations: unknown[] };
     expect(createBody.destinations).not.toContainEqual({ type: 'public', uri: 'app.example.com' });
-    // The final reconcile (after the domain attach) claims the now-attached hostname.
+    // The covering PUT (after the domain attach) claims the now-attached hostname.
     const finalPutPos = calls.findIndex((c) => c[0].endsWith('/access/apps/app-123') && c[1]?.method === 'PUT');
     expect(finalPutPos).toBeGreaterThan(attachPos);
     const finalBody = JSON.parse(calls[finalPutPos]![1]?.body as string) as { destinations: unknown[] };
@@ -254,17 +254,27 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     expect(createBody.destinations).toContainEqual({ type: 'public', uri: 'old.example.com' });
     expect(createBody.destinations).not.toContainEqual({ type: 'public', uri: 'app.example.com' });
     expect(createBody.destinations).not.toContainEqual({ type: 'public', uri: 'other.example.com' });
-    // The final reconcile (after attach + detach) claims the configured hostname
-    // and drops the detached one.
-    const finalPutPos = calls.findIndex((c) => c[0].endsWith('/access/apps/app-123') && c[1]?.method === 'PUT');
-    expect(finalPutPos).toBeGreaterThan(detachPos);
-    const finalBody = JSON.parse(calls[finalPutPos]![1]?.body as string) as { destinations: unknown[] };
+    // The covering PUT (immediately after attach, before any detach) closes the
+    // perimeter over everything routed at that instant: the configured hostname
+    // AND the still-attached stale one.
+    const accessPuts = calls
+      .map((c, index) => ({ index, call: c }))
+      .filter(({ call }) => call[0].endsWith('/access/apps/app-123') && call[1]?.method === 'PUT');
+    expect(accessPuts).toHaveLength(2);
+    const coveringPut = accessPuts[0]!;
+    const finalPut = accessPuts[1]!;
+    expect(coveringPut.index).toBeGreaterThan(attachPos);
+    expect(coveringPut.index).toBeLessThan(detachPos);
+    const coveringBody = JSON.parse(coveringPut.call[1]?.body as string) as { destinations: unknown[] };
+    expect(coveringBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
+    expect(coveringBody.destinations).toContainEqual({ type: 'public', uri: 'old.example.com' });
+    // After the stale hostname is detached, the app drops it and keeps only the
+    // configured one; the foreign hostname is never detached.
+    expect(finalPut.index).toBeGreaterThan(detachPos);
+    const finalBody = JSON.parse(finalPut.call[1]?.body as string) as { destinations: unknown[] };
     expect(finalBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
     expect(finalBody.destinations).not.toContainEqual({ type: 'public', uri: 'old.example.com' });
-    // The dropped hostname is detached only after the app covers it and the
-    // configured one is attached; the foreign hostname is never detached.
     expect(detachPos).toBeGreaterThan(createPos);
-    expect(detachPos).toBeGreaterThan(attachPos);
     expect(calls.some((c) => c[0].includes('/workers/domains/dom-other'))).toBe(false);
     const steps = (out.providerMetadata?.steps ?? []) as { name: string; detail?: string }[];
     expect(steps).toContainEqual({ name: 'custom-domain-detach', status: 'done', detail: 'old.example.com' });
