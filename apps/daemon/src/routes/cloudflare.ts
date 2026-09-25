@@ -218,6 +218,11 @@ export function registerCloudflareRoutes(
       return res.status(403).json({ error: 'cross-origin request rejected' });
     }
 
+    // Set once this attempt owns the credential mutation. A failure before that
+    // point (e.g. an unreadable config file) belongs to no attempt of ours, so
+    // the catch must not tear down a listener a previous /start installed — its
+    // redirect would then land on a closed port.
+    let attemptMutationEntered = false;
     try {
       const cfg = await readCloudflareWorkersConfig();
       // The Connect UI posts the clientId/redirectUri it just collected; on a
@@ -253,6 +258,7 @@ export function registerCloudflareRoutes(
       // generation, evict stale PKCE state, mint new state, install the new
       // listener) so two overlapping /start calls can never race to bind :56122
       // and the loser's catch can't stop the winner's listener.
+      attemptMutationEntered = true;
       await runCredentialMutation(async () => {
         await stopActiveListener();
         oauthAttemptGeneration += 1;
@@ -281,7 +287,11 @@ export function registerCloudflareRoutes(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[cloudflare-oauth] start failed:', msg);
-      await stopActiveListener();
+      if (attemptMutationEntered) {
+        await runCredentialMutation(async () => {
+          await stopActiveListener();
+        });
+      }
       res.status(502).json({ error: msg });
     }
   });
@@ -347,11 +357,17 @@ export function registerCloudflareRoutes(
     try {
       const tok = await getCloudflareOAuthToken(cloudflareOAuthTokensDir());
       if (!tok) {
-        return res.json({ connected: false, listening: activeListener !== null });
+        return res.json({ connected: false, refreshable: false, listening: activeListener !== null });
       }
+      // `refreshable` lets the client tell an ordinary access-token expiry (the
+      // daemon refreshes silently on the next call) from a credential that
+      // genuinely needs a Reconnect; `savedAt` changes on every persist, so a
+      // Reconnect poll can wait for a NEW token rather than the still-present
+      // old one.
       res.json({
         connected: true,
         expiresAt: tok.expiresAt ?? null,
+        refreshable: Boolean(tok.refreshToken),
         scope: tok.scope ?? null,
         accountId: tok.accountId ?? null,
         savedAt: tok.savedAt,

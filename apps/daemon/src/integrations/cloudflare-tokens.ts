@@ -76,7 +76,14 @@ export function sanitizeCloudflareOAuthTokensFile(
     out.lastGeneration = raw.lastGeneration;
   }
   const tok = sanitizeToken(raw.token);
-  if (tok) out.token = tok;
+  if (tok) {
+    out.token = tok;
+    // A file written before `lastGeneration` existed (or hand-edited without
+    // it) must still be refreshable: the compare-and-set persist matches on the
+    // FILE generation, so seed it from the token or every refresh fails the
+    // check and the expired access token is returned forever.
+    if (out.lastGeneration === undefined) out.lastGeneration = tok.generation;
+  }
   return out;
 }
 

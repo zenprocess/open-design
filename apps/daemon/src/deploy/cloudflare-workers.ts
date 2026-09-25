@@ -188,7 +188,7 @@ export function cloudflareWorkersScriptNameForProject(name: string): string {
   return slug;
 }
 
-function resolveWorkerScriptName(override: string | undefined, fallbackName: string): string {
+export function resolveWorkerScriptName(override: string | undefined, fallbackName: string): string {
   if (override) {
     const valid = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(override);
     if (!valid) {
@@ -559,8 +559,9 @@ async function createCloudflareAccessApp(
   // hostname is a zone hostname and needs its own `public` destination, or the
   // site is served unprotected on the custom domain.
   if (input.customDomain?.hostname) destinations.push({ type: 'public', uri: input.customDomain.hostname });
+  const ownedAppName = cloudflareAccessAppNameForScript(input.scriptName);
   const body: JsonObject = {
-    name: input.scriptName + ' (OpenDesign)',
+    name: ownedAppName,
     type: 'self_hosted',
     destinations,
   };
@@ -579,10 +580,16 @@ async function createCloudflareAccessApp(
   }
   const existing = await findCloudflareAccessAppByWorker(config, workerId);
   const existingId = existing && typeof existing.id === 'string' ? existing.id : '';
-  // Only replace an app we created (the id recorded by our previous deploy).
-  // A user-managed Access app that claims this Worker must not be overwritten
-  // with our OTP + email rule and later deleted when Access is switched off.
-  if (existingId && existingId !== input.priorAccessAppId) {
+  const existingName = existing && typeof existing.name === 'string' ? existing.name : '';
+  // Only replace an app we created: the id recorded by our previous deploy, or
+  // an app carrying our own `<script> (OpenDesign)` name — a deploy that created
+  // the app and then failed before its record was written leaves exactly that
+  // behind, and must be adopted rather than locking the user out of their own
+  // app. A user-managed Access app that claims this Worker must not be
+  // overwritten with our OTP + email rule and later deleted when Access is
+  // switched off.
+  const adoptable = existingId !== '' && existingName === ownedAppName;
+  if (existingId && existingId !== input.priorAccessAppId && !adoptable) {
     const name = typeof existing?.name === 'string' ? existing.name : existingId;
     throw new DeployError(
       'Cloudflare Access app "' + name + '" already protects this Worker but was not created by OpenDesign. Remove it or turn off OpenDesign Access to continue.',
@@ -612,31 +619,58 @@ async function createCloudflareAccessApp(
   return { appId, workerId };
 }
 
+/** The name OpenDesign gives the Access app it creates for a Worker. It doubles
+ * as the ownership marker used to adopt an app whose id was never recorded. */
+export function cloudflareAccessAppNameForScript(scriptName: string): string {
+  return scriptName + ' (OpenDesign)';
+}
+
+const ACCESS_PERIMETER_ATTEMPTS = 3;
+const ACCESS_PERIMETER_RETRY_BASE_MS = 300;
+
+// One HEAD against a public URL; resolves to the failure instead of throwing so
+// the caller can retry a bounded number of times.
+async function probeCloudflareAccessPerimeterOnce(url: string): Promise<DeployError | null> {
+  let resp: Response;
+  try {
+    resp = await fetch(url, { method: 'HEAD', redirect: 'manual' });
+  } catch (err) {
+    return new DeployError(
+      'Could not verify Cloudflare Access on ' + url + ': ' + String((err as Error)?.message || err),
+      502,
+      { url },
+      'CFW_ACCESS_UNVERIFIED',
+    );
+  }
+  const location = resp.headers?.get?.('location') || '';
+  if (!isCloudflareAccessRedirect(resp.status, location)) {
+    return new DeployError(
+      url + ' is not behind Cloudflare Access (HTTP ' + resp.status + '). The deploy was not marked ready.',
+      502,
+      { url, status: resp.status },
+      'CFW_ACCESS_UNVERIFIED',
+    );
+  }
+  return null;
+}
+
 // Hard post-deploy assertion: every URL a deploy with Access enabled reports
 // must answer with an Access login redirect. This holds regardless of any
-// future ordering bug in the steps above.
+// future ordering bug in the steps above. A fresh custom hostname (certificate
+// still issuing) or a just-enabled workers.dev name can take a moment to
+// answer at all, so each URL gets a short bounded retry before the deploy is
+// declared unverified.
 async function verifyCloudflareAccessPerimeter(urls: string[]): Promise<void> {
   for (const url of urls) {
-    let resp: Response;
-    try {
-      resp = await fetch(url, { method: 'HEAD', redirect: 'manual' });
-    } catch (err) {
-      throw new DeployError(
-        'Could not verify Cloudflare Access on ' + url + ': ' + String((err as Error)?.message || err),
-        502,
-        { url },
-        'CFW_ACCESS_UNVERIFIED',
-      );
+    let failure: DeployError | null = null;
+    for (let attempt = 0; attempt < ACCESS_PERIMETER_ATTEMPTS; attempt += 1) {
+      failure = await probeCloudflareAccessPerimeterOnce(url);
+      if (!failure) break;
+      if (attempt < ACCESS_PERIMETER_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, ACCESS_PERIMETER_RETRY_BASE_MS * 2 ** attempt));
+      }
     }
-    const location = resp.headers?.get?.('location') || '';
-    if (!isCloudflareAccessRedirect(resp.status, location)) {
-      throw new DeployError(
-        url + ' is not behind Cloudflare Access (HTTP ' + resp.status + '). The deploy was not marked ready.',
-        502,
-        { url, status: resp.status },
-        'CFW_ACCESS_UNVERIFIED',
-      );
-    }
+    if (failure) throw failure;
   }
 }
 

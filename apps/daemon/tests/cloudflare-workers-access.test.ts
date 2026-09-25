@@ -265,6 +265,72 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     expect(steps).toContainEqual({ name: 'access-app-prior-retained', status: 'done', detail: 'app-old' });
   });
 
+  it('adopts an existing app carrying the OpenDesign name when no app id was recorded (failed first deploy)', async () => {
+    const { calls, fn } = accessFetch({
+      accessList: {
+        success: true,
+        result: [{ id: 'app-orphan', name: 'my-site (OpenDesign)', destinations: [{ type: 'worker', worker_id: 'tag-abc-123' }] }],
+      },
+      accessUpdate: { success: true, result: { id: 'app-orphan' } },
+    });
+    vi.stubGlobal('fetch', fn);
+    const out = await deployToCloudflareWorkers({
+      ...base,
+      access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+    });
+    expect(calls.some((c) => c[0].includes('/access/apps/app-orphan') && c[1]?.method === 'PUT')).toBe(true);
+    expect(calls.some((c) => c[0].endsWith('/access/apps') && c[1]?.method === 'POST')).toBe(false);
+    expect(out.providerMetadata).toMatchObject({ accessAppId: 'app-orphan', accessProtected: true });
+  });
+
+  it('still refuses an app with a foreign name even when it claims the same Worker', async () => {
+    const { fn } = accessFetch({
+      accessList: {
+        success: true,
+        result: [{ id: 'app-theirs', name: 'my-site (Corp SSO)', destinations: [{ type: 'worker', worker_id: 'tag-abc-123' }] }],
+      },
+    });
+    vi.stubGlobal('fetch', fn);
+    await expect(
+      deployToCloudflareWorkers({ ...base, access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } } }),
+    ).rejects.toMatchObject({ code: 'CFW_ACCESS_APP_FOREIGN' });
+  });
+
+  it('retries the Access perimeter check before declaring the deploy unverified', async () => {
+    let heads = 0;
+    const { calls, fn } = accessFetch({
+      // A hostname whose certificate/route is still propagating answers 404
+      // once, then challenges with the Access login as expected.
+      head: () => (heads++ === 0 ? new Response('', { status: 404 }) : accessRedirect()),
+    });
+    vi.stubGlobal('fetch', fn);
+    const out = await deployToCloudflareWorkers({
+      ...base,
+      access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+    });
+    expect(out.providerMetadata).toMatchObject({ accessVerified: true });
+    expect(calls.filter((c) => c[1]?.method === 'HEAD').length).toBe(2);
+  });
+
+  it('annotates a failure after the Access app was created with the app id, so the route can record it', async () => {
+    const { fn } = accessFetch();
+    const wrapped = vi.fn(async (url: string, init?: RequestInit) => {
+      if ((init?.method || 'GET').toUpperCase() === 'POST' && url.endsWith('/workers/scripts/my-site/subdomain')) {
+        return jsonResponse({ success: false, errors: [{ message: 'workers.dev enable unavailable' }] }, 500);
+      }
+      return fn(url, init);
+    });
+    vi.stubGlobal('fetch', wrapped);
+    let caught: { code?: string; steps?: Array<{ name: string; status: string; detail?: string }> } | undefined;
+    try {
+      await deployToCloudflareWorkers({ ...base, access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } } });
+    } catch (err) {
+      caught = err as typeof caught;
+    }
+    expect(caught).toBeTruthy();
+    expect(caught?.steps).toContainEqual({ name: 'access-app', status: 'done', detail: 'app-123' });
+  });
+
   it('turning access off retains a prior app that no longer references this Worker', async () => {
     const { calls, fn } = accessFetch({
       accessGet: { success: true, result: { id: 'app-old', destinations: [{ type: 'worker', worker_id: 'tag-OLD' }] } },

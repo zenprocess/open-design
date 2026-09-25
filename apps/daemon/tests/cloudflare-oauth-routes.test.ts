@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -7,17 +7,25 @@ import express from 'express';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { registerCloudflareRoutes } from '../src/routes/cloudflare.js';
 import {
+  CLOUDFLARE_WORKERS_PROVIDER_ID,
   cloudflareOAuthTokensDir,
   configureCloudflareWorkersDataDir,
+  deployConfigPath,
 } from '../src/deploy.js';
-import { getCloudflareOAuthToken } from '../src/integrations/cloudflare-tokens.js';
+import {
+  clearCloudflareOAuthToken,
+  getCloudflareOAuthToken,
+  setCloudflareOAuthToken,
+} from '../src/integrations/cloudflare-tokens.js';
 
 // The loopback callback server binds :56122; stub it so the route test never
-// opens a real socket (and never races the fixed redirect port).
+// opens a real socket (and never races the fixed redirect port). `listenerStop`
+// is shared so a test can assert whether a listener was torn down.
+const listenerStop = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('../src/integrations/cloudflare-oauth-server.js', () => ({
   startCallbackListener: vi.fn(async () => ({
     address: { host: '127.0.0.1', port: 56122 },
-    stop: async () => {},
+    stop: listenerStop,
   })),
 }));
 
@@ -142,6 +150,69 @@ describe('cloudflare-oauth routes', () => {
       expect(persisted).toBeNull();
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it('auth/status reports refreshable + savedAt so the client can tell an expiry from a reconnect', async () => {
+    const dataDir = cloudflareOAuthTokensDir();
+    try {
+      await setCloudflareOAuthToken(dataDir, {
+        accessToken: 'acc',
+        tokenType: 'Bearer',
+        refreshToken: 'ref',
+        expiresAt: Date.now() - 1000,
+        generation: 0,
+        savedAt: 1_700_000_000_000,
+      });
+      const withRefresh = await (await fetch(`${app.baseUrl}/api/cloudflare/auth/status`)).json() as Record<string, unknown>;
+      expect(withRefresh).toMatchObject({ connected: true, refreshable: true, savedAt: 1_700_000_000_000 });
+      expect(typeof withRefresh.expiresAt).toBe('number');
+
+      await setCloudflareOAuthToken(dataDir, {
+        accessToken: 'acc-2',
+        tokenType: 'Bearer',
+        expiresAt: Date.now() - 1000,
+        generation: 0,
+        savedAt: 1_700_000_000_001,
+      });
+      const noRefresh = await (await fetch(`${app.baseUrl}/api/cloudflare/auth/status`)).json() as Record<string, unknown>;
+      expect(noRefresh).toMatchObject({ connected: true, refreshable: false, savedAt: 1_700_000_000_001 });
+
+      await clearCloudflareOAuthToken(dataDir);
+      const cleared = await (await fetch(`${app.baseUrl}/api/cloudflare/auth/status`)).json() as Record<string, unknown>;
+      expect(cleared).toMatchObject({ connected: false, refreshable: false });
+    } finally {
+      await clearCloudflareOAuthToken(dataDir);
+    }
+  });
+
+  it('a /start that fails before owning the attempt leaves the previous listener running', async () => {
+    const configPath = deployConfigPath(CLOUDFLARE_WORKERS_PROVIDER_ID);
+    const body = JSON.stringify({ clientId: 'client-abc', redirectUri: 'http://127.0.0.1:56122/callback' });
+    try {
+      const first = await fetch(`${app.baseUrl}/api/cloudflare/oauth/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(first.status).toBe(200);
+      listenerStop.mockClear();
+
+      // Make the config unreadable (a directory where the file should be):
+      // readCloudflareWorkersConfig throws before the attempt mutation runs.
+      await mkdir(configPath, { recursive: true });
+      const second = await fetch(`${app.baseUrl}/api/cloudflare/oauth/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(second.status).toBe(502);
+      expect(listenerStop).not.toHaveBeenCalled();
+      const status = await (await fetch(`${app.baseUrl}/api/cloudflare/auth/status`)).json() as { listening: boolean };
+      expect(status.listening).toBe(true);
+    } finally {
+      await rm(configPath, { recursive: true, force: true });
+      await fetch(`${app.baseUrl}/api/cloudflare/oauth/cancel`, { method: 'POST' });
     }
   });
 });

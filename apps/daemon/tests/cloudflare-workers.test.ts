@@ -18,6 +18,7 @@ import {
 import {
   cloudflareWorkersAssetHash,
   cloudflareWorkersScriptNameForProject,
+  resolveWorkerScriptName,
   deployToCloudflareWorkers,
 } from '../src/deploy/cloudflare-workers.js';
 
@@ -221,6 +222,13 @@ describe('cloudflare-workers hash and name', () => {
     expect(cloudflareWorkersAssetHash(INDEX)).toBe(createHash('sha256').update(b64 + 'html').digest('hex').slice(0, 32));
     const noext = cloudflareWorkersAssetHash({ file: 'README', data: Buffer.from('<h1>hi</h1>') });
     expect(noext).toBe(createHash('sha256').update(b64).digest('hex').slice(0, 32));
+  });
+
+  it('resolves the deploy script name the same way for the route single-flight key and the provider', () => {
+    expect(resolveWorkerScriptName(undefined, 'My Site!')).toBe('my-site');
+    expect(resolveWorkerScriptName('', 'My Site!')).toBe('my-site');
+    expect(resolveWorkerScriptName('custom-name', 'My Site!')).toBe('custom-name');
+    expect(() => resolveWorkerScriptName('Bad Name', 'My Site!')).toThrow(/Invalid Workers script name/);
   });
 
   it('slugs project names and rejects empty ones', () => {
