@@ -4414,6 +4414,8 @@ export interface Dict {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': string;
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': string;
   'fileViewer.cloudflareWorkersAccessProtected': string;
+  'fileViewer.cloudflareWorkersAccessRuleRequired': string;
+  'fileViewer.cloudflareWorkersBindingIncomplete': string;
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': string;
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': string;
   'fileViewer.cloudflareWorkersReasonNoPermission': string;

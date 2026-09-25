@@ -3488,6 +3488,8 @@ export const uk: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'UUID політики Access',
   'fileViewer.cloudflareWorkersAccessProtected': 'Захищено Cloudflare Access',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Додайте принаймні один e-mail, домен e-mail або ID політики Access перед розгортанням із Cloudflare Access.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'Кожній прив’язці потрібні назва та бакет або база даних.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'R2 не ввімкнено для цього облікового запису.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'Cloudflare Access не ввімкнено для цього облікового запису.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'Токен API не має дозволу на цю дію.',

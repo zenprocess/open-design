@@ -3488,6 +3488,8 @@ export const tr: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'Access ilkesi UUID’si',
   'fileViewer.cloudflareWorkersAccessProtected': 'Cloudflare Access tarafından korunuyor',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Cloudflare Access ile dağıtmadan önce en az bir e-posta, e-posta alan adı veya Access ilke kimliği ekleyin.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'Her bağlamanın bir adı ve bir bucket ya da veritabanı olmalıdır.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'Bu hesap için R2 etkin değil.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'Bu hesap için Cloudflare Access etkin değil.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'API token’ının bu işlem için izni yok.',

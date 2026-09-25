@@ -3488,6 +3488,8 @@ export const ko: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'Access 정책 UUID',
   'fileViewer.cloudflareWorkersAccessProtected': 'Cloudflare Access로 보호됨',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Cloudflare Access로 배포하기 전에 이메일, 이메일 도메인 또는 Access 정책 ID를 하나 이상 추가하세요.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': '각 바인딩에는 이름과 버킷 또는 데이터베이스가 필요합니다.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': '이 계정에서는 R2가 활성화되어 있지 않습니다.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': '이 계정에서는 Cloudflare Access가 활성화되어 있지 않습니다.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'API 토큰에 이 작업을 수행할 권한이 없습니다.',

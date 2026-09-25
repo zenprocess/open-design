@@ -3690,6 +3690,8 @@ export const zhTW: Dict = {
   "fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder": "example.com",
   "fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder": "Access 政策 UUID",
   "fileViewer.cloudflareWorkersAccessProtected": "受 Cloudflare Access 保護",
+  "fileViewer.cloudflareWorkersAccessRuleRequired": "使用 Cloudflare Access 部署前,請至少新增一個電子郵件、電子郵件網域或 Access 政策 ID。",
+  "fileViewer.cloudflareWorkersBindingIncomplete": "每個繫結都需要名稱以及一個儲存貯體或資料庫。",
   "fileViewer.cloudflareWorkersReasonR2NotEnabled": "此帳戶未啟用 R2。",
   "fileViewer.cloudflareWorkersReasonAccessNotEnabled": "此帳戶未啟用 Cloudflare Access。",
   "fileViewer.cloudflareWorkersReasonNoPermission": "API 代碼沒有執行此操作的權限。",

@@ -3488,6 +3488,8 @@ export const hu: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'Access-szabályzat UUID',
   'fileViewer.cloudflareWorkersAccessProtected': 'Cloudflare Access védi',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Adj meg legalább egy e-mail-címet, e-mail-domaint vagy Access-szabályzat-azonosítót, mielőtt Cloudflare Access-szel telepítesz.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'Minden bindinghoz név és egy bucket vagy adatbázis szükséges.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'Az R2 nincs engedélyezve ehhez a fiókhoz.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'A Cloudflare Access nincs engedélyezve ehhez a fiókhoz.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'Az API tokennek nincs jogosultsága ehhez a művelethez.',

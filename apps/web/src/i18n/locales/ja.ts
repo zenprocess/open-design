@@ -3488,6 +3488,8 @@ export const ja: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'Access ポリシーの UUID',
   'fileViewer.cloudflareWorkersAccessProtected': 'Cloudflare Access で保護されています',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Cloudflare Access でデプロイする前に、メールアドレス、メールドメイン、または Access ポリシー ID を少なくとも 1 つ追加してください。',
+  'fileViewer.cloudflareWorkersBindingIncomplete': '各バインディングには名前と、バケットまたはデータベースが必要です。',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'このアカウントでは R2 が有効になっていません。',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'このアカウントでは Cloudflare Access が有効になっていません。',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'API トークンにこの操作の権限がありません。',

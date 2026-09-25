@@ -3488,6 +3488,8 @@ export const ptBR: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'UUID da política Access',
   'fileViewer.cloudflareWorkersAccessProtected': 'Protegido pelo Cloudflare Access',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Adicione pelo menos um e-mail, um domínio de e-mail ou um ID de política do Access antes de implantar com o Cloudflare Access.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'Cada binding precisa de um nome e de um bucket ou banco de dados.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'O R2 não está habilitado para esta conta.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'O Cloudflare Access não está habilitado para esta conta.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'O token da API não tem permissão para esta ação.',

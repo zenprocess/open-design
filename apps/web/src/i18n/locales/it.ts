@@ -3488,6 +3488,8 @@ export const it: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'UUID del criterio Access',
   'fileViewer.cloudflareWorkersAccessProtected': 'Protetto da Cloudflare Access',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Aggiungi almeno un’email, un dominio email o un ID di policy Access prima di distribuire con Cloudflare Access.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'Ogni binding richiede un nome e un bucket o un database.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'R2 non è abilitato per questo account.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'Cloudflare Access non è abilitato per questo account.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'Il token API non dispone dell’autorizzazione per questa azione.',

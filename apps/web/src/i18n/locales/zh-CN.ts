@@ -3680,6 +3680,8 @@ export const zhCN: Dict = {
   "fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder": "example.com",
   "fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder": "Access 策略 UUID",
   "fileViewer.cloudflareWorkersAccessProtected": "受 Cloudflare Access 保护",
+  "fileViewer.cloudflareWorkersAccessRuleRequired": "使用 Cloudflare Access 部署前,请至少添加一个邮箱、邮箱域名或 Access 策略 ID。",
+  "fileViewer.cloudflareWorkersBindingIncomplete": "每个绑定都需要名称以及一个存储桶或数据库。",
   "fileViewer.cloudflareWorkersReasonR2NotEnabled": "此账户未启用 R2。",
   "fileViewer.cloudflareWorkersReasonAccessNotEnabled": "此账户未启用 Cloudflare Access。",
   "fileViewer.cloudflareWorkersReasonNoPermission": "API 令牌没有执行此操作的权限。",

@@ -3488,6 +3488,8 @@ export const id: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'UUID kebijakan Access',
   'fileViewer.cloudflareWorkersAccessProtected': 'Dilindungi oleh Cloudflare Access',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'Tambahkan setidaknya satu email, domain email, atau ID kebijakan Access sebelum men-deploy dengan Cloudflare Access.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'Setiap binding memerlukan nama dan bucket atau database.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'R2 tidak diaktifkan untuk akun ini.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'Cloudflare Access tidak diaktifkan untuk akun ini.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'Token API tidak memiliki izin untuk tindakan ini.',

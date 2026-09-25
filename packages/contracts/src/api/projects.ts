@@ -948,15 +948,44 @@ export interface CloudflareWorkersCapabilities {
 
 /**
  * Rotating Cloudflare OAuth credentials, as persisted in
- * `cloudflare-oauth-tokens.json`. `scopes` is the granted scope list
- * (space-separated on the token response, split here for the public surface).
+ * `cloudflare-oauth-tokens.json`. `scope` is the granted scope string exactly
+ * as the token response carries it (space-separated); the daemon stores and
+ * returns it unsplit.
  */
 export interface CloudflareOAuthCredentials {
   accessToken: string;
   refreshToken?: string;
   expiresAt?: number;
-  scopes?: string[];
+  scope?: string;
   accountId?: string;
+}
+
+export interface CloudflareWorkersDeployStep {
+  name: string;
+  status: 'done' | 'error';
+  detail?: string;
+}
+
+/** Post-deploy reachability probe of the Worker URL; `status` is the HTTP status. */
+export interface CloudflareWorkersDeployCheck {
+  status: number;
+  ok: boolean;
+  detail?: string;
+}
+
+/**
+ * Public, provider-specific facts about a Cloudflare Workers deployment. The
+ * daemon's internal `providerMetadata` is stripped from every deployment
+ * response; anything the UI needs (the step list, the Access badge, the 5xx
+ * health warning) must be lifted into this declared field instead.
+ */
+export interface CloudflareWorkersDeploymentInfo {
+  accessProtected?: boolean;
+  accessAppId?: string;
+  createdByOpenDesign?: boolean;
+  customDomain?: { hostname: string; url: string };
+  steps?: CloudflareWorkersDeployStep[];
+  check?: CloudflareWorkersDeployCheck;
 }
 
 export interface DeployConfigResponse {
@@ -996,7 +1025,8 @@ export interface UpdateDeployConfigRequest {
   bindings?: CloudflareWorkersBinding[];
   access?: CloudflareWorkersAccess;
   cloudflarePages?: CloudflarePagesConfigHints;
-  customDomain?: { hostname: string; zoneId: string };
+  /** `null` clears a saved domain; an absent key keeps it (daemon read-modify-write). */
+  customDomain?: { hostname: string; zoneId: string } | null;
 }
 
 export interface DeploymentInfo {
@@ -1012,6 +1042,7 @@ export interface DeploymentInfo {
   statusMessage?: string;
   reachableAt?: number;
   cloudflarePages?: CloudflarePagesDeploymentInfo;
+  cloudflareWorkers?: CloudflareWorkersDeploymentInfo;
   createdAt: number;
   updatedAt: number;
 }

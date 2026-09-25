@@ -3488,6 +3488,8 @@ export const fa: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'UUID سیاست Access',
   'fileViewer.cloudflareWorkersAccessProtected': 'محافظت‌شده توسط Cloudflare Access',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'پیش از استقرار با Cloudflare Access دست‌کم یک ایمیل، یک دامنهٔ ایمیل یا شناسهٔ سیاست Access اضافه کنید.',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'هر اتصال به یک نام و یک باکت یا پایگاه داده نیاز دارد.',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'R2 برای این حساب فعال نیست.',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'Cloudflare Access برای این حساب فعال نیست.',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'توکن API برای این عملیات مجوز ندارد.',

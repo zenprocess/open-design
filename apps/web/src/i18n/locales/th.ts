@@ -3488,6 +3488,8 @@ export const th: Dict = {
   'fileViewer.cloudflareWorkersAccessEmailDomainPlaceholder': 'example.com',
   'fileViewer.cloudflareWorkersAccessPolicyIdPlaceholder': 'UUID ของนโยบาย Access',
   'fileViewer.cloudflareWorkersAccessProtected': 'ได้รับการปกป้องโดย Cloudflare Access',
+  'fileViewer.cloudflareWorkersAccessRuleRequired': 'เพิ่มอีเมล โดเมนอีเมล หรือ ID นโยบาย Access อย่างน้อยหนึ่งรายการก่อนปรับใช้ด้วย Cloudflare Access',
+  'fileViewer.cloudflareWorkersBindingIncomplete': 'การเชื่อมโยงแต่ละรายการต้องมีชื่อและบัคเก็ตหรือฐานข้อมูล',
   'fileViewer.cloudflareWorkersReasonR2NotEnabled': 'R2 ยังไม่ได้เปิดใช้งานสำหรับบัญชีนี้',
   'fileViewer.cloudflareWorkersReasonAccessNotEnabled': 'Cloudflare Access ยังไม่ได้เปิดใช้งานสำหรับบัญชีนี้',
   'fileViewer.cloudflareWorkersReasonNoPermission': 'โทเคน API ไม่มีสิทธิ์สำหรับการดำเนินการนี้',
