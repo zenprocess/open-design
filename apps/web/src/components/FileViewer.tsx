@@ -8046,7 +8046,7 @@ function HtmlViewer({
   const [cloudflareWorkersCustomDomainHostname, setCloudflareWorkersCustomDomainHostname] = useState('');
   const [cloudflareWorkersCustomDomainZoneId, setCloudflareWorkersCustomDomainZoneId] = useState('');
   const [cloudflareWorkersAccessEnabled, setCloudflareWorkersAccessEnabled] = useState(false);
-  const [cloudflareWorkersAccessRuleKind, setCloudflareWorkersAccessRuleKind] = useState<WebCloudflareWorkersAccessRuleKind>('self');
+  const [cloudflareWorkersAccessRuleKind, setCloudflareWorkersAccessRuleKind] = useState<WebCloudflareWorkersAccessRuleKind>('emails');
   const [cloudflareWorkersAccessEmails, setCloudflareWorkersAccessEmails] = useState('');
   const [cloudflareWorkersAccessEmailDomain, setCloudflareWorkersAccessEmailDomain] = useState('');
   const [cloudflareWorkersAccessPolicyId, setCloudflareWorkersAccessPolicyId] = useState('');
@@ -9546,7 +9546,7 @@ function HtmlViewer({
     setCloudflareWorkersCustomDomainZoneId(matchingConfig?.customDomain?.zoneId || '');
     const cloudflareWorkersAccessConfig = matchingConfig?.access;
     setCloudflareWorkersAccessEnabled(cloudflareWorkersAccessConfig?.enabled ?? false);
-    setCloudflareWorkersAccessRuleKind(cloudflareWorkersAccessConfig?.rule?.kind ?? 'self');
+    setCloudflareWorkersAccessRuleKind(cloudflareWorkersAccessConfig?.rule?.kind ?? 'emails');
     setCloudflareWorkersAccessEmails(
       cloudflareWorkersAccessConfig?.rule?.kind === 'emails'
         ? cloudflareWorkersAccessConfig.rule.emails.join(', ')
@@ -14947,9 +14947,13 @@ function HtmlViewer({
         // authoritative for the mode.
         if (status?.connected) {
           setCloudflareWorkersCredentialMode(config.credentialMode === 'oauth' ? 'oauth' : 'token');
+          // Same rule for the identity fields: the daemon commits clientId /
+          // redirectUri together with the token, so mid-connect the stored
+          // config has neither and adopting it would blank what the user just
+          // typed (and make a retry POST an empty client id).
+          setCloudflareWorkersClientId(config.clientId || '');
+          setCloudflareWorkersRedirectUri(config.redirectUri || '');
         }
-        setCloudflareWorkersClientId(config.clientId || '');
-        setCloudflareWorkersRedirectUri(config.redirectUri || '');
         setDeployConfig(config);
       }
       await loadCloudflareWorkersCapabilities(config && config.providerId === deployProviderId ? config : deployConfig);

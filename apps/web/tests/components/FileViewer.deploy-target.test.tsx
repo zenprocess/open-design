@@ -601,7 +601,7 @@ describe('FileViewer Workers deploy config (review regressions)', () => {
 
   it('keeps the form in OAuth mode when Refresh runs mid-connect and the stored config still says token', async () => {
     vi.stubGlobal('fetch', mockWorkersFetch({
-      config: { credentialMode: 'token', clientId: 'client-1', redirectUri: 'http://127.0.0.1:8976/callback' },
+      config: { credentialMode: 'token', clientId: '', redirectUri: '' },
       authStatus: () => ({ connected: false }),
     }));
     vi.stubGlobal('open', vi.fn(() => null));
@@ -609,6 +609,11 @@ describe('FileViewer Workers deploy config (review regressions)', () => {
     await openWorkersDeployModal();
     const modeSelect = screen.getByRole('combobox', { name: /credential mode/i }) as HTMLSelectElement;
     fireEvent.change(modeSelect, { target: { value: 'oauth' } });
+    // Fresh setup: nothing stored yet, the user types the identity by hand.
+    const clientIdInput = screen.getByLabelText(/client id/i) as HTMLInputElement;
+    const redirectUriInput = screen.getByLabelText(/redirect uri/i) as HTMLInputElement;
+    fireEvent.change(clientIdInput, { target: { value: 'client-typed' } });
+    fireEvent.change(redirectUriInput, { target: { value: 'http://127.0.0.1:8976/callback' } });
     const connect = await screen.findByTestId('cfw-oauth-connect');
     await waitFor(() => {
       expect((connect as HTMLButtonElement).disabled).toBe(false);
@@ -630,5 +635,28 @@ describe('FileViewer Workers deploy config (review regressions)', () => {
     await screen.findByRole('button', { name: 'Refresh status' });
     expect((screen.getByRole('combobox', { name: /credential mode/i }) as HTMLSelectElement).value).toBe('oauth');
     expect(screen.getByText('Waiting for Cloudflare authorization…')).toBeTruthy();
+    // The stored config has no clientId yet (the daemon commits it with the
+    // token), so a not-connected Refresh must not blank what the user typed.
+    expect((screen.getByLabelText(/client id/i) as HTMLInputElement).value).toBe('client-typed');
+    expect((screen.getByLabelText(/redirect uri/i) as HTMLInputElement).value).toBe('http://127.0.0.1:8976/callback');
+  });
+});
+
+describe('FileViewer Workers Access rule default', () => {
+  it('defaults the Access rule to emails, since "only me" cannot resolve under the OAuth scope set', async () => {
+    let configPut: Record<string, unknown> | null = null;
+    vi.stubGlobal('fetch', mockWorkersFetch({ onConfigPut: (body) => { configPut = body; } }));
+
+    await openWorkersDeployModal();
+    fireEvent.click(screen.getByTestId('cfw-access-enabled'));
+    const ruleSelect = await screen.findByTestId('cfw-access-rule');
+    expect((ruleSelect as HTMLSelectElement).value).toBe('emails');
+
+    fireEvent.change(screen.getByPlaceholderText(/@/), { target: { value: 'me@example.com' } });
+    clickDeploySubmitButton();
+    await waitFor(() => {
+      expect(configPut).not.toBeNull();
+    });
+    expect((configPut!.access as { rule?: { kind?: string } }).rule?.kind).toBe('emails');
   });
 });
