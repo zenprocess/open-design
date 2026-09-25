@@ -761,7 +761,7 @@ export function classifyCloudflareRefreshFailure(err: unknown): DeployError {
   const detail = err instanceof Error ? err.message : String(err);
   const httpStatus = /\bHTTP (\d{3})\b/.exec(detail);
   const status = httpStatus ? Number(httpStatus[1]) : 0;
-  if (status >= 400 && status < 500) {
+  if (status >= 400 && status < 500 && status !== 429) {
     return new DeployError(
       'Cloudflare rejected the OAuth refresh (' + detail + ') — reconnect Cloudflare.',
       401,

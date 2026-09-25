@@ -908,6 +908,11 @@ export async function deployToCloudflareWorkers(input: {
         metadata.accessAppId = app.appId;
         metadata.createdByOpenDesign = true;
         steps.push({ name: 'access-app', status: 'done', detail: app.appId });
+      } else if (priorAccessAppId) {
+        // Preview never reconciles the production app; keep its id on the record
+        // so a later production deploy with Access off can still retire it.
+        metadata.accessAppId = priorAccessAppId;
+        metadata.createdByOpenDesign = true;
       }
       // A preview deploy never reconciles (deletes) the production Access app:
       // flipping Access off and running a preview must not expose production.
@@ -1042,10 +1047,11 @@ export async function deployToCloudflareWorkers(input: {
       providerMetadata: metadata,
     };
   } catch (err) {
-    if (err instanceof DeployError) {
-      steps.push({ name: 'error', status: 'error', detail: err.message });
-      (err as DeployError & { steps?: DeployStep[] }).steps = steps;
-    }
+    // Attach the partial steps (including any created accessAppId) to EVERY
+    // error, not just DeployError — a transport failure after the Access app
+    // step must still let the route record the app id instead of orphaning it.
+    steps.push({ name: 'error', status: 'error', detail: err instanceof Error ? err.message : String(err) });
+    (err as { steps?: DeployStep[] }).steps = steps;
     throw err;
   }
 }
