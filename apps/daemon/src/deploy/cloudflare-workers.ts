@@ -1036,6 +1036,7 @@ export async function deployToCloudflareWorkers(input: {
           // unprotected hostname behind. Only runs when it was NOT already
           // attached, so a pre-existing route is never torn down.
           let idToDetach = domainId;
+          let compensationFailed = false;
           if (!idToDetach) {
             try {
               idToDetach =
@@ -1043,15 +1044,22 @@ export async function deployToCloudflareWorkers(input: {
                   (domain) => domain.hostname === configuredHostname,
                 )?.id ?? '';
             } catch {
-              idToDetach = '';
+              compensationFailed = true;
             }
           }
           if (idToDetach) {
             try {
               await detachCloudflareWorkerDomain(cfg, idToDetach);
             } catch {
-              // best-effort; the original covering-PUT error still propagates
+              compensationFailed = true;
             }
+          } else {
+            compensationFailed = true;
+          }
+          if (compensationFailed) {
+            console.error(
+              `[cloudflare-workers] Access covering PUT failed; automatic detach of "${configuredHostname}" did not complete — the hostname may be live but unprotected.`,
+            );
           }
           throw err;
         }

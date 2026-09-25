@@ -340,7 +340,56 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
         access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
         customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
       }),
-    ).rejects.toBeTruthy();
+    ).rejects.toThrow(/cover denied/);
+    const failedPutPos = calls.findIndex((c) => c[0].endsWith('/access/apps/app-123') && c[1]?.method === 'PUT');
+    const detachPos = calls.findIndex((c) => c[0].endsWith('/workers/domains/dom-1') && c[1]?.method === 'DELETE');
+    expect(failedPutPos).toBeGreaterThanOrEqual(0);
+    expect(detachPos).toBeGreaterThan(failedPutPos);
+  });
+
+  it('re-lists to find the domain id when the attach returns none, and still detaches it on covering-PUT failure', async () => {
+    const { calls, fn } = accessFetch({
+      accessUpdate: { success: false, errors: [{ message: 'cover denied' }] },
+      // attach succeeds but omits an id (some Cloudflare responses return null id)
+      domains: { success: true, result: {} },
+    });
+    // First GET /workers/domains is the pre-attach listing (empty, so the
+    // covering PUT runs); the second is the catch's re-list, which returns the
+    // id Cloudflare assigned.
+    let domainsGets = 0;
+    const wrapped = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes('/workers/domains') && (init?.method || 'GET').toUpperCase() === 'GET') {
+        domainsGets += 1;
+        if (domainsGets > 1) {
+          return jsonResponse({ success: true, result: [{ id: 'dom-9', hostname: 'app.example.com', service: 'my-site' }] });
+        }
+      }
+      return fn(url, init);
+    });
+    vi.stubGlobal('fetch', wrapped);
+    await expect(
+      deployToCloudflareWorkers({
+        ...base,
+        access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+        customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
+      }),
+    ).rejects.toThrow(/cover denied/);
+    expect(calls.some((c) => c[0].endsWith('/workers/domains/dom-9') && c[1]?.method === 'DELETE')).toBe(true);
+  });
+
+  it('still surfaces the covering-PUT error when the compensation detach itself fails', async () => {
+    const { calls, fn } = accessFetch({
+      accessUpdate: { success: false, errors: [{ message: 'cover denied' }] },
+      domainsDelete: { success: false, errors: [{ message: 'detach denied' }] },
+    });
+    vi.stubGlobal('fetch', fn);
+    await expect(
+      deployToCloudflareWorkers({
+        ...base,
+        access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+        customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
+      }),
+    ).rejects.toThrow(/cover denied/);
     expect(calls.some((c) => c[0].endsWith('/workers/domains/dom-1') && c[1]?.method === 'DELETE')).toBe(true);
   });
 
