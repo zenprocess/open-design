@@ -423,7 +423,11 @@ async function findCloudflareAccessAppByWorker(config: WorkersDeployConfig, work
     });
     if (match) return match;
     const info = (json.result_info ?? {}) as JsonObject;
-    const totalPages = typeof info.total_pages === 'number' && info.total_pages > 0 ? info.total_pages : 1;
+    const totalPages = typeof info.total_pages === 'number' && info.total_pages > 0
+      ? info.total_pages
+      : typeof info.total_count === 'number' && info.total_count > 0
+        ? Math.ceil(info.total_count / 100)
+        : 1;
     if (page >= totalPages || apps.length === 0) return null;
     page += 1;
   }
