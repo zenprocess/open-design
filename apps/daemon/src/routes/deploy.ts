@@ -314,6 +314,13 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
         statusMessage: result.statusMessage,
         reachableAt: result.reachableAt,
         cloudflarePages: result.cloudflarePages,
+        // providerMetadata is stripped by publicDeployment, so surface the
+        // Workers result (accessProtected/steps/check/customDomain) in a field
+        // that survives to the client.
+        cloudflareWorkers:
+          providerId === CLOUDFLARE_WORKERS_PROVIDER_ID
+            ? (result.providerMetadata as unknown as import('@open-design/contracts').CloudflareWorkersDeploymentInfo | undefined)
+            : undefined,
         providerMetadata:
           providerId === CLOUDFLARE_PAGES_PROVIDER_ID
             ? (result.providerMetadata ?? cloudflarePagesDeploymentMetadata(cloudflarePagesProjectName))
