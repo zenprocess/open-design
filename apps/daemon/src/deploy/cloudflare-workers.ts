@@ -1020,15 +1020,41 @@ export async function deployToCloudflareWorkers(input: {
       const configuredAlreadyAttached = attachedDomains.some((domain) => domain.hostname === configuredHostname);
       if (accessOn && accessAppId && !configuredAlreadyAttached) {
         const coveringPublicHostnames = [configuredHostname, ...staleDomains.map((domain) => domain.hostname)];
-        await createCloudflareAccessApp(cfg, {
-          scriptName,
-          rule: access!.rule!,
-          includePreview: true,
-          workerId,
-          publicHostnames: coveringPublicHostnames,
-          selfEmail,
-          knownAppId: accessAppId,
-        });
+        try {
+          await createCloudflareAccessApp(cfg, {
+            scriptName,
+            rule: access!.rule!,
+            includePreview: true,
+            workerId,
+            publicHostnames: coveringPublicHostnames,
+            selfEmail,
+            knownAppId: accessAppId,
+          });
+        } catch (err) {
+          // The covering PUT failed: the hostname is live but uncovered. Detach
+          // it best-effort before rethrowing so the deploy never leaves a public,
+          // unprotected hostname behind. Only runs when it was NOT already
+          // attached, so a pre-existing route is never torn down.
+          let idToDetach = domainId;
+          if (!idToDetach) {
+            try {
+              idToDetach =
+                (await listCloudflareWorkerDomainsForScript(cfg, scriptName)).find(
+                  (domain) => domain.hostname === configuredHostname,
+                )?.id ?? '';
+            } catch {
+              idToDetach = '';
+            }
+          }
+          if (idToDetach) {
+            try {
+              await detachCloudflareWorkerDomain(cfg, idToDetach);
+            } catch {
+              // best-effort; the original covering-PUT error still propagates
+            }
+          }
+          throw err;
+        }
       }
     }
     // Detach every hostname Cloudflare routes to the script that the config no

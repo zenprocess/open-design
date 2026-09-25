@@ -281,6 +281,69 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     expect(out.providerMetadata).toMatchObject({ accessVerified: true });
   });
 
+  it('does not re-PUT the Access app when the configured hostname is already attached and nothing is stale', async () => {
+    const { calls, fn } = accessFetch({
+      domainsList: {
+        success: true,
+        result: [{ id: 'dom-1', hostname: 'app.example.com', service: 'my-site', zone_id: 'zone-1' }],
+      },
+    });
+    vi.stubGlobal('fetch', fn);
+    await deployToCloudflareWorkers({
+      ...base,
+      access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+      customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
+    });
+    // The pre-PUT app already covers the configured hostname; a steady-state
+    // redeploy must not churn an extra PUT.
+    expect(calls.some((c) => c[0].endsWith('/access/apps') && c[1]?.method === 'POST')).toBe(true);
+    expect(calls.some((c) => c[0].endsWith('/access/apps/app-123') && c[1]?.method === 'PUT')).toBe(false);
+  });
+
+  it('skips the covering PUT and only drops the stale hostname when the configured hostname is already attached', async () => {
+    const { calls, fn } = accessFetch({
+      domainsList: {
+        success: true,
+        result: [
+          { id: 'dom-1', hostname: 'app.example.com', service: 'my-site', zone_id: 'zone-1' },
+          { id: 'dom-old', hostname: 'old.example.com', service: 'my-site', zone_id: 'zone-1' },
+        ],
+      },
+    });
+    vi.stubGlobal('fetch', fn);
+    await deployToCloudflareWorkers({
+      ...base,
+      access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+      customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
+    });
+    const detachPos = calls.findIndex((c) => c[0].endsWith('/workers/domains/dom-old') && c[1]?.method === 'DELETE');
+    const puts = calls
+      .map((c, index) => ({ index, call: c }))
+      .filter(({ call }) => call[0].endsWith('/access/apps/app-123') && call[1]?.method === 'PUT');
+    // One PUT only: the post-detach reconcile dropping the stale hostname. The
+    // covering PUT is skipped because the configured hostname was already routed.
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.index).toBeGreaterThan(detachPos);
+    const finalBody = JSON.parse(puts[0]!.call[1]?.body as string) as { destinations: unknown[] };
+    expect(finalBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
+    expect(finalBody.destinations).not.toContainEqual({ type: 'public', uri: 'old.example.com' });
+  });
+
+  it('detaches the just-attached hostname when the covering PUT fails, so no public hostname is left behind', async () => {
+    const { calls, fn } = accessFetch({
+      accessUpdate: { success: false, errors: [{ message: 'cover denied' }] },
+    });
+    vi.stubGlobal('fetch', fn);
+    await expect(
+      deployToCloudflareWorkers({
+        ...base,
+        access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+        customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
+      }),
+    ).rejects.toBeTruthy();
+    expect(calls.some((c) => c[0].endsWith('/workers/domains/dom-1') && c[1]?.method === 'DELETE')).toBe(true);
+  });
+
   it('detaches a dropped hostname even with Access off and no custom domain configured', async () => {
     const { calls, fn } = accessFetch({
       domainsList: { success: true, result: [{ id: 'dom-old', hostname: 'old.example.com', service: 'my-site' }] },
