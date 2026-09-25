@@ -357,13 +357,10 @@ async function resolveCloudflareSelfEmail(token: string): Promise<string> {
 }
 
 async function getCloudflareWorkerTag(config: WorkersDeployConfig, scriptName: string): Promise<string> {
-  const resp = await fetchWithRetry(
-    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts',
-    { method: 'GET', headers: cloudflareHeaders(config.token) },
+  const scripts = await listCloudflareAllPages(
+    config,
+    '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts',
   );
-  const json = await readCloudflareJson(resp);
-  if (!resp.ok || json.success === false) return '';
-  const scripts = Array.isArray(json.result) ? (json.result as JsonObject[]) : [];
   const script = scripts.find((item) => item?.id === scriptName);
   return typeof script?.tag === 'string' ? script.tag : '';
 }
@@ -374,12 +371,12 @@ async function getCloudflareWorkerTag(config: WorkersDeployConfig, scriptName: s
 // and pin the app to it via `allowed_idps`.
 async function ensureCloudflareOtpIdentityProvider(config: WorkersDeployConfig): Promise<string> {
   const base = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/identity_providers';
-  const listResp = await fetchWithRetry(base, { method: 'GET', headers: cloudflareHeaders(config.token) });
-  const listJson = await readCloudflareJson(listResp);
-  if (listResp.ok && listJson.success === true && Array.isArray(listJson.result)) {
-    const existing = (listJson.result as JsonObject[]).find((p) => p?.type === 'onetimepin');
-    if (existing && typeof existing.id === 'string') return existing.id;
-  }
+  const providers = await listCloudflareAllPages(
+    config,
+    '/accounts/' + encodeURIComponent(config.accountId) + '/access/identity_providers',
+  );
+  const existing = providers.find((p) => p?.type === 'onetimepin');
+  if (existing && typeof existing.id === 'string') return existing.id;
   const createResp = await fetchWithRetry(
     base,
     {
@@ -415,7 +412,10 @@ async function findCloudflareAccessAppByWorker(config: WorkersDeployConfig, work
       { method: 'GET', headers: cloudflareHeaders(config.token) },
     );
     const json = await readCloudflareJson(resp);
-    if (!resp.ok || json.success !== true || !Array.isArray(json.result)) return null;
+    // A genuine list failure (permission/5xx) must fail closed, not be conflated
+    // with "zero apps" — otherwise the caller escalates to a duplicate POST.
+    if (!resp.ok) throw cloudflareError(json, resp.status, 'Cloudflare Access apps list failed.');
+    if (json.success !== true || !Array.isArray(json.result)) return null;
     const apps = json.result as JsonObject[];
     const match = apps.find((a) => {
       const dests = Array.isArray(a?.destinations) ? (a.destinations as JsonObject[]) : [];
@@ -526,6 +526,11 @@ export async function deployToCloudflareWorkers(input: {
   const { config, files, projectId = '', projectName = '', target = 'production', access, priorAccessAppId, customDomain } = input ?? {};
   const accountId = config?.accountId;
   if (!accountId) throw new DeployError('Cloudflare account ID is required.', 400, undefined, 'CFW_ACCOUNT_ID_REQUIRED');
+  // Fail closed on the enabled-but-inert shape: `{enabled:true}` with no rule
+  // would otherwise deploy live and unprotected while the UI believes Access is on.
+  if (access?.enabled && !access.rule) {
+    throw new DeployError('Cloudflare Access is enabled but has no rule — add an email, domain, or policy.', 400, undefined, 'CFW_ACCESS_EMPTY_RULE');
+  }
   // Resolve the live credential: the configured static API token in 'token'
   // mode, or the rotating OAuth access token (refreshed behind a single-flight
   // lock in deploy.ts) in 'oauth' mode.
@@ -599,7 +604,12 @@ export async function deployToCloudflareWorkers(input: {
           }
         }
       } else if (priorAccessAppId) {
-        await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+        try {
+          await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+        } catch {
+          // best-effort: a lingering stale app is benign; throwing after the
+          // live PUT is not.
+        }
       }
       metadata.steps = steps;
       const prefix = versionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'preview';
@@ -633,7 +643,12 @@ export async function deployToCloudflareWorkers(input: {
         }
       }
     } else if (priorAccessAppId) {
-      await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+      try {
+        await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+      } catch {
+        // best-effort: a lingering stale app is benign; throwing after the
+        // live PUT is not.
+      }
     }
     await enableWorkerSubdomain(cfg, scriptName, subdomain);
     steps.push({ name: 'subdomain', status: 'done', detail: url });
