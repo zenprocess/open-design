@@ -6,7 +6,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   CLOUDFLARE_PAGES_PROVIDER_ID,
+  CLOUDFLARE_WORKERS_PROVIDER_ID,
   cloudflarePagesProjectNameForProject,
+  commitCloudflareOAuthMode,
+  configureCloudflareWorkersDataDir,
   deployConfigPath,
   VERCEL_PROVIDER_ID,
   SAVED_CLOUDFLARE_TOKEN_MASK,
@@ -1579,6 +1582,141 @@ describe('deploy provider routes', () => {
           url: 'https://vercel-still-works.example',
           status: 'ready',
         });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    } finally {
+      if (priorStateRoot === undefined) delete process.env.OD_USER_STATE_DIR;
+      else process.env.OD_USER_STATE_DIR = priorStateRoot;
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the Workers zones picker without an account id instead of listing every visible zone', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'od-deploy-route-workers-zones-'));
+    const priorStateRoot = process.env.OD_USER_STATE_DIR;
+    process.env.OD_USER_STATE_DIR = stateRoot;
+    configureCloudflareWorkersDataDir(stateRoot);
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
+      if (url.startsWith(baseUrl)) return realFetchFor(url)(input, init);
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const realFetch = globalThis.fetch;
+    const realFetchFor = () => realFetch;
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const resp = await fetch(`${baseUrl}/api/deploy/cloudflare-workers/zones`);
+      expect(resp.status).toBe(400);
+      expect(await resp.json()).toMatchObject({ error: { code: 'CFW_ACCOUNT_ID_REQUIRED' } });
+      // no Cloudflare call was made
+      expect(fetchMock.mock.calls.every(([input]) => String(input instanceof Request ? input.url : input).startsWith(baseUrl))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorStateRoot === undefined) delete process.env.OD_USER_STATE_DIR;
+      else process.env.OD_USER_STATE_DIR = priorStateRoot;
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('propagates an OAuth credential failure from the Workers routes instead of collapsing it to "not configured"', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'od-deploy-route-workers-oauth-'));
+    const priorStateRoot = process.env.OD_USER_STATE_DIR;
+    process.env.OD_USER_STATE_DIR = stateRoot;
+    configureCloudflareWorkersDataDir(stateRoot);
+    try {
+      const saveResp = await fetch(`${baseUrl}/api/deploy/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId: CLOUDFLARE_WORKERS_PROVIDER_ID, token: 'tok', accountId: 'acct_test' }),
+      });
+      expect(saveResp.status).toBe(200);
+      // Flip to oauth with no stored OAuth token: the credential resolver throws.
+      await commitCloudflareOAuthMode();
+
+      // The resolver throws 401 CFW_OAUTH_RECONNECT_REQUIRED; the routes used to
+      // swallow it into `configured:false` / `zones:[]` / CFW_TOKEN_REQUIRED.
+      const caps = await fetch(`${baseUrl}/api/deploy/cloudflare-workers/capabilities`);
+      expect(caps.status).toBe(401);
+      const capsBody = await caps.json() as { error: { code: string }; configured?: boolean };
+      expect(capsBody.configured).toBeUndefined();
+      expect(capsBody.error.code).toBe('CFW_OAUTH_RECONNECT_REQUIRED');
+
+      const zones = await fetch(`${baseUrl}/api/deploy/cloudflare-workers/zones`);
+      expect(zones.status).toBe(401);
+      expect((await zones.json() as { error: { code: string } }).error.code).toBe('CFW_OAUTH_RECONNECT_REQUIRED');
+
+      const del = await fetch(`${baseUrl}/api/deploy/cloudflare-workers/domains/dom-1`, { method: 'DELETE' });
+      expect(del.status).toBe(401);
+      expect((await del.json() as { error: { code: string } }).error.code).toBe('CFW_OAUTH_RECONNECT_REQUIRED');
+    } finally {
+      if (priorStateRoot === undefined) delete process.env.OD_USER_STATE_DIR;
+      else process.env.OD_USER_STATE_DIR = priorStateRoot;
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a second concurrent Cloudflare Workers deploy of the same project with 409 DEPLOY_IN_PROGRESS', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'od-deploy-route-workers-singleflight-'));
+    const priorStateRoot = process.env.OD_USER_STATE_DIR;
+    process.env.OD_USER_STATE_DIR = stateRoot;
+    configureCloudflareWorkersDataDir(stateRoot);
+    try {
+      const dataDir = process.env.OD_DATA_DIR;
+      if (!dataDir) throw new Error('OD_DATA_DIR is required for daemon route tests');
+      const projectId = `workers-singleflight-${Date.now()}`;
+      const dir = await ensureProject(path.join(dataDir, 'projects'), projectId);
+      await writeFile(path.join(dir, 'index.html'), '<!doctype html><h1>Hello</h1>');
+      const createProjectResp = await fetch(`${baseUrl}/api/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: projectId, name: 'Workers single flight', skillId: null, designSystemId: null }),
+      });
+      expect(createProjectResp.status).toBe(200);
+      const saveResp = await fetch(`${baseUrl}/api/deploy/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId: CLOUDFLARE_WORKERS_PROVIDER_ID, token: 'tok', accountId: 'acct_test', scriptName: 'single-flight' }),
+      });
+      expect(saveResp.status).toBe(200);
+
+      const realFetch = globalThis.fetch;
+      let scriptPuts = 0;
+      const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+      const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
+        if (url.startsWith(baseUrl)) return realFetch(input, init);
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.endsWith('/workers/subdomain')) {
+          // Hold the first deploy here long enough for the second request to arrive.
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          return json({ success: true, result: { subdomain: 'acct-test' } });
+        }
+        if (url.includes('assets-upload-session')) return json({ success: true, result: { jwt: 'SESS', buckets: [] } });
+        if (method === 'PUT' && url.endsWith('/workers/scripts/single-flight')) {
+          scriptPuts += 1;
+          return json({ success: true, result: {} });
+        }
+        if (url.includes('/subdomain')) return json({ success: true, result: { enabled: true } });
+        if (method === 'HEAD') return new Response('', { status: 200 });
+        return json({ success: true, result: {} });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        const body = JSON.stringify({ fileName: 'index.html', providerId: CLOUDFLARE_WORKERS_PROVIDER_ID });
+        const first = fetch(`${baseUrl}/api/projects/${projectId}/deploy`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const second = fetch(`${baseUrl}/api/projects/${projectId}/deploy`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        const [r1, r2] = await Promise.all([first, second]);
+        const statuses = [r1.status, r2.status].sort();
+        expect(statuses).toEqual([200, 409]);
+        const rejected = r1.status === 409 ? r1 : r2;
+        expect(await rejected.json()).toMatchObject({ error: { code: 'DEPLOY_IN_PROGRESS' } });
+        expect(scriptPuts).toBe(1);
+
+        // Once the first finished, a new deploy is admitted again.
+        const third = await fetch(`${baseUrl}/api/projects/${projectId}/deploy`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        expect(third.status).toBe(200);
       } finally {
         vi.unstubAllGlobals();
       }

@@ -10,6 +10,45 @@ export interface RegisterDeployRoutesDeps extends RouteDeps<'db' | 'http' | 'pat
   authorizeProjectRequest: AuthorizeProjectRequest;
 }
 
+// Resolve the live Cloudflare Workers credential for a route. In oauth mode a
+// DeployError from the refresh (CFW_OAUTH_RECONNECT_REQUIRED, …) must reach the
+// client as-is: swallowing it into "token required"/"not configured" tells an
+// OAuth user to paste an API token.
+async function resolveCloudflareWorkersRouteToken(config: { token?: string | undefined; credentialMode?: string | undefined }): Promise<string> {
+  if (config.credentialMode === 'oauth') return getCloudflareAccessToken('cloudflare-workers');
+  return config.token || '';
+}
+
+// Per-project single-flight for Cloudflare Workers deploys: the provider's
+// list-then-create steps (Access app, D1, R2) race when two deploys of the same
+// project overlap (double-click, agent retry), and the loser fails after its
+// script PUT is already live.
+const cloudflareWorkersDeploysInFlight = new Map<string, Promise<unknown>>();
+export function isCloudflareWorkersDeployInFlight(projectId: string): boolean {
+  return cloudflareWorkersDeploysInFlight.has(projectId);
+}
+async function withCloudflareWorkersDeploySingleFlight<T>(projectId: string, run: () => Promise<T>): Promise<T> {
+  if (cloudflareWorkersDeploysInFlight.has(projectId)) {
+    throw new DeployErrorLike('A Cloudflare Workers deploy for this project is already in progress.', 409, 'DEPLOY_IN_PROGRESS');
+  }
+  const p = run();
+  cloudflareWorkersDeploysInFlight.set(projectId, p);
+  try {
+    return await p;
+  } finally {
+    cloudflareWorkersDeploysInFlight.delete(projectId);
+  }
+}
+class DeployErrorLike extends Error {
+  status: number;
+  code: string;
+  constructor(message: string, status: number, code: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps) {
   const { db } = ctx;
   const { sendApiError } = ctx.http;
@@ -34,7 +73,10 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
    */
   const deployErrorCodeFor = (err: any, status: number): string =>
     (err instanceof DeployError && err.code) ||
+    (err instanceof DeployErrorLike && err.code) ||
     (status === 404 ? 'FILE_NOT_FOUND' : 'BAD_REQUEST');
+  const deployErrorStatus = (err: any): number =>
+    err instanceof DeployError || err instanceof DeployErrorLike ? err.status : 400;
 
   // ---- Deploy --------------------------------------------------------------
 
@@ -92,14 +134,7 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
         res.json(empty);
         return;
       }
-      let token = config.token;
-      if (config.credentialMode === 'oauth') {
-        try {
-          token = await getCloudflareAccessToken(CLOUDFLARE_WORKERS_PROVIDER_ID);
-        } catch {
-          token = '';
-        }
-      }
+      const token = await resolveCloudflareWorkersRouteToken(config);
       if (!token) {
         res.json(empty);
         return;
@@ -115,19 +150,17 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
   app.get('/api/deploy/cloudflare-workers/zones', async (_req, res) => {
     try {
       const config = await readDeployConfig(CLOUDFLARE_WORKERS_PROVIDER_ID);
-      let token = config.token;
-      if (config.credentialMode === 'oauth') {
-        try {
-          token = await getCloudflareAccessToken(CLOUDFLARE_WORKERS_PROVIDER_ID);
-        } catch {
-          token = '';
-        }
+      // `/zones?account.id=` (empty) lists every zone the token can see, across
+      // accounts; a picked foreign zone then fails at attach. Require the account.
+      if (!config.accountId) {
+        return sendApiError(res, 400, 'CFW_ACCOUNT_ID_REQUIRED', 'Cloudflare account ID is required.');
       }
+      const token = await resolveCloudflareWorkersRouteToken(config);
       if (!token) {
         res.json({ zones: [] });
         return;
       }
-      const zones = await listCloudflareZones({ token, accountId: config.accountId || '' });
+      const zones = await listCloudflareZones({ token, accountId: config.accountId });
       res.json({ zones });
     } catch (err: any) {
       const status = err instanceof DeployError ? err.status : 400;
@@ -138,19 +171,12 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
   app.delete('/api/deploy/cloudflare-workers/domains/:domainId', async (req, res) => {
     try {
       const config = await readDeployConfig(CLOUDFLARE_WORKERS_PROVIDER_ID);
-      // Mirror the capabilities/zones token resolution: oauth refreshes the
-      // rotating access token, token mode reads the configured static token.
-      let token = config.token;
-      if (config.credentialMode === 'oauth') {
-        try {
-          token = await getCloudflareAccessToken(CLOUDFLARE_WORKERS_PROVIDER_ID);
-        } catch {
-          token = '';
-        }
-      }
       if (!config.accountId) {
         return sendApiError(res, 400, 'CFW_ACCOUNT_ID_REQUIRED', 'Cloudflare account ID is required.');
       }
+      // Mirror the capabilities/zones token resolution: oauth refreshes the
+      // rotating access token, token mode reads the configured static token.
+      const token = await resolveCloudflareWorkersRouteToken(config);
       if (!token) {
         return sendApiError(res, 400, 'CFW_TOKEN_REQUIRED', 'Cloudflare API token is required.');
       }
@@ -239,6 +265,9 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
       const workersConfig = providerId === CLOUDFLARE_WORKERS_PROVIDER_ID
         ? await readDeployConfig(CLOUDFLARE_WORKERS_PROVIDER_ID)
         : undefined;
+      // The single-flight guard for Workers is armed before the file plan/CF
+      // calls of a second overlapping deploy can run, so the loser is refused
+      // up front instead of after its script PUT.
       const result = providerId === CLOUDFLARE_PAGES_PROVIDER_ID
         ? await deployToCloudflarePages({
             config: {
@@ -252,8 +281,8 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
             target,
           })
         : providerId === CLOUDFLARE_WORKERS_PROVIDER_ID
-          ? await deployToCloudflareWorkers({
-              config: workersConfig ?? await readDeployConfig(CLOUDFLARE_WORKERS_PROVIDER_ID),
+          ? await withCloudflareWorkersDeploySingleFlight(req.params.id, () => deployToCloudflareWorkers({
+              config: workersConfig!,
               files,
               projectId: req.params.id,
               projectName: project?.name,
@@ -264,7 +293,7 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
                 typeof prior?.providerMetadata?.accessAppId === 'string'
                   ? prior.providerMetadata.accessAppId
                   : undefined,
-            })
+            }))
           : await deployToVercel({
               config: await readDeployConfig(VERCEL_PROVIDER_ID),
               files,
@@ -296,9 +325,9 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
       });
       res.json(publicDeployment(body));
     } catch (err: any) {
-      const status = err instanceof DeployError ? err.status : 400;
+      const status = deployErrorStatus(err);
       const code = deployErrorCodeFor(err, status);
-      const failure = classifyDeployFailure(stage, err, err instanceof DeployError);
+      const failure = classifyDeployFailure(stage, err, err instanceof DeployError || err instanceof DeployErrorLike);
       const requestId = clientRequestIdFor(req);
       // Structured companion to the response: automatic diagnostics bundles
       // include the daemon log, and `requestId` joins it to the client event.

@@ -12,6 +12,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
 }
 
+function accessRedirect(): Response {
+  return new Response('', { status: 302, headers: { location: 'https://acct-test.cloudflareaccess.com/cdn-cgi/access/login' } });
+}
+
 type Call = [string, RequestInit | undefined];
 
 const INDEX = { file: 'index.html', data: Buffer.from('<h1>hi</h1>') };
@@ -22,10 +26,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function accessFetch(overrides: Record<string, unknown> = {}) {
+type AccessOverrides = Record<string, unknown> & { head?: (url: string) => Response };
+
+function accessFetch(overrides: AccessOverrides = {}) {
   const calls: Call[] = [];
   const fn = vi.fn(async (url: string, init?: RequestInit) => {
     calls.push([url, init]);
+    if ((init?.method || 'GET').toUpperCase() === 'HEAD') {
+      // Public URLs of an Access-protected deploy answer with the login redirect.
+      return overrides.head ? overrides.head(url) : accessRedirect();
+    }
+    if (url.includes('/workers/domains')) {
+      return jsonResponse(overrides.domains ?? { success: true, result: { id: 'dom-1' } });
+    }
     if (url.includes('assets-upload-session')) {
       return jsonResponse(overrides.session ?? { success: true, result: { jwt: 'SESS', buckets: [] } });
     }
@@ -48,7 +61,10 @@ function accessFetch(overrides: Record<string, unknown> = {}) {
       const method = (init?.method || 'GET').toUpperCase();
       if (method === 'DELETE') return jsonResponse(overrides.accessDelete ?? { success: true, result: { id: 'app-123' } });
       if (method === 'PUT') return jsonResponse(overrides.accessUpdate ?? { success: true, result: { id: 'app-123' } });
-      return jsonResponse(overrides.accessGet ?? { success: true, result: { id: 'app-123' } });
+      return jsonResponse(overrides.accessGet ?? {
+        success: true,
+        result: { id: 'app-123', destinations: [{ type: 'worker', worker_id: 'tag-abc-123' }, { type: 'preview_worker', worker_id: 'tag-abc-123' }] },
+      });
     }
     if (url.includes('/access/apps')) {
       const method = (init?.method || 'GET').toUpperCase();
@@ -134,6 +150,7 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     const out = await deployToCloudflareWorkers({
       ...base,
       access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+      priorAccessAppId: 'app-existing',
     });
     const putCall = calls.find((c) => c[0].includes('/access/apps/app-existing') && c[1]?.method === 'PUT');
     expect(putCall).toBeTruthy();
@@ -141,6 +158,131 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     expect(putBody.allowed_idps).toEqual(['otp-123']);
     expect(calls.some((c) => c[0].endsWith('/access/apps') && c[1]?.method === 'POST')).toBe(false);
     expect(out.providerMetadata).toMatchObject({ accessAppId: 'app-existing' });
+  });
+
+  it('refuses to overwrite a user-managed Access app that claims the Worker', async () => {
+    const { calls, fn } = accessFetch({
+      accessList: {
+        success: true,
+        result: [{ id: 'app-theirs', name: 'Corp SSO', destinations: [{ type: 'worker', worker_id: 'tag-abc-123' }] }],
+      },
+    });
+    vi.stubGlobal('fetch', fn);
+    await expect(
+      deployToCloudflareWorkers({ ...base, access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } } }),
+    ).rejects.toMatchObject({ name: 'DeployError', code: 'CFW_ACCESS_APP_FOREIGN', status: 409 });
+    expect(calls.some((c) => c[0].includes('/access/apps') && (c[1]?.method === 'PUT' || c[1]?.method === 'POST'))).toBe(false);
+    expect(calls.some((c) => c[0].includes('/access/apps') && c[1]?.method === 'DELETE')).toBe(false);
+    // Access is reconciled BEFORE the live PUT, so nothing new went live either.
+    expect(calls.some((c) => c[1]?.method === 'PUT' && c[0].endsWith('/workers/scripts/my-site'))).toBe(false);
+  });
+
+  it('adds a public destination for the custom hostname and verifies both URLs land on Access', async () => {
+    const { calls, fn } = accessFetch();
+    vi.stubGlobal('fetch', fn);
+    const out = await deployToCloudflareWorkers({
+      ...base,
+      access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+      customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
+    });
+    const createPos = calls.findIndex((c) => c[0].endsWith('/access/apps') && c[1]?.method === 'POST');
+    const attachPos = calls.findIndex((c) => c[0].includes('/workers/domains') && c[1]?.method === 'PUT');
+    expect(createPos).toBeGreaterThanOrEqual(0);
+    expect(attachPos).toBeGreaterThan(createPos);
+    const createBody = JSON.parse(calls[createPos]![1]?.body as string) as { destinations: unknown[] };
+    expect(createBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
+    const heads = calls.filter((c) => c[1]?.method === 'HEAD').map((c) => c[0]);
+    expect(heads).toContain('https://my-site.acct-test.workers.dev');
+    expect(heads).toContain('https://app.example.com');
+    expect(out.providerMetadata).toMatchObject({ accessVerified: true, customDomain: { id: 'dom-1', hostname: 'app.example.com' } });
+  });
+
+  it('does not report ready when a public URL is not behind Access', async () => {
+    const { fn } = accessFetch({
+      head: (url) => (url === 'https://app.example.com' ? new Response('', { status: 200 }) : accessRedirect()),
+    });
+    vi.stubGlobal('fetch', fn);
+    await expect(
+      deployToCloudflareWorkers({
+        ...base,
+        access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+        customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
+      }),
+    ).rejects.toMatchObject({ name: 'DeployError', code: 'CFW_ACCESS_UNVERIFIED' });
+  });
+
+  it('fails closed (no fallback create, no live PUT) when the scripts list errors', async () => {
+    const { calls, fn } = accessFetch({ scripts: { success: false, errors: [{ message: 'upstream' }] } });
+    // make the scripts list a 500 rather than a 200-with-error envelope
+    const wrapped = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes('/workers/scripts?')) {
+        calls.push([url, init]);
+        return jsonResponse({ success: false, errors: [{ message: 'upstream' }] }, 500);
+      }
+      return fn(url, init);
+    });
+    vi.stubGlobal('fetch', wrapped);
+    await expect(
+      deployToCloudflareWorkers({ ...base, access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } } }),
+    ).rejects.toMatchObject({ name: 'DeployError' });
+    expect(calls.some((c) => c[0].includes('/access/apps') && c[1]?.method === 'POST')).toBe(false);
+    expect(calls.some((c) => c[1]?.method === 'PUT' && c[0].endsWith('/workers/scripts/my-site'))).toBe(false);
+  });
+
+  it('a transient IdP list failure is not mis-reported as a missing OTP scope', async () => {
+    const { calls, fn } = accessFetch();
+    const wrapped = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes('/access/identity_providers') && (init?.method || 'GET').toUpperCase() === 'GET') {
+        calls.push([url, init]);
+        return jsonResponse({ success: false, errors: [{ message: 'upstream' }] }, 500);
+      }
+      return fn(url, init);
+    });
+    vi.stubGlobal('fetch', wrapped);
+    let caught: { code?: string } | undefined;
+    try {
+      await deployToCloudflareWorkers({ ...base, access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } } });
+    } catch (err) {
+      caught = err as { code?: string };
+    }
+    expect(caught).toBeTruthy();
+    expect(caught?.code).not.toBe('CFW_ACCESS_OTP_SCOPE_REQUIRED');
+    expect(calls.some((c) => c[0].includes('/access/identity_providers') && c[1]?.method === 'POST')).toBe(false);
+  });
+
+  it('retains a prior Access app that still guards a different (renamed) Worker', async () => {
+    const { calls, fn } = accessFetch({
+      accessGet: { success: true, result: { id: 'app-old', destinations: [{ type: 'worker', worker_id: 'tag-OLD' }] } },
+    });
+    vi.stubGlobal('fetch', fn);
+    const out = await deployToCloudflareWorkers({
+      ...base,
+      access: { enabled: true, rule: { kind: 'emails', emails: ['a@b.c'] } },
+      priorAccessAppId: 'app-old',
+    });
+    expect(calls.some((c) => c[0].includes('/access/apps/') && c[1]?.method === 'DELETE')).toBe(false);
+    const steps = (out.providerMetadata?.steps ?? []) as Array<{ name: string; detail?: string }>;
+    expect(steps).toContainEqual({ name: 'access-app-prior-retained', status: 'done', detail: 'app-old' });
+  });
+
+  it('turning access off retains a prior app that no longer references this Worker', async () => {
+    const { calls, fn } = accessFetch({
+      accessGet: { success: true, result: { id: 'app-old', destinations: [{ type: 'worker', worker_id: 'tag-OLD' }] } },
+    });
+    vi.stubGlobal('fetch', fn);
+    await deployToCloudflareWorkers({ ...base, access: { enabled: false }, priorAccessAppId: 'app-old' });
+    expect(calls.some((c) => c[0].includes('/access/apps/') && c[1]?.method === 'DELETE')).toBe(false);
+  });
+
+  it('a preview deploy with Access off never deletes the production Access app', async () => {
+    const { calls, fn } = accessFetch();
+    const wrapped = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes('/versions')) return jsonResponse({ success: true, result: { id: 'v12345678' } });
+      return fn(url, init);
+    });
+    vi.stubGlobal('fetch', wrapped);
+    await deployToCloudflareWorkers({ ...base, target: 'preview', access: { enabled: false }, priorAccessAppId: 'app-123' });
+    expect(calls.some((c) => c[0].includes('/access/apps/') && c[1]?.method === 'DELETE')).toBe(false);
   });
 
   it('fails closed when the OTP identity provider cannot be created', async () => {

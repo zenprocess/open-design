@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { CLOUDFLARE_WORKERS_PROVIDER_ID, DeployError, getCloudflareAccessToken } from '../deploy.js';
+import { CLOUDFLARE_WORKERS_PROVIDER_ID, DeployError, getCloudflareAccessToken, isCloudflareAccessRedirect, normalizeCloudflareWorkersBindings } from '../deploy.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -74,14 +74,14 @@ function cloudflareError(json: JsonObject, status: number, fallback: string): De
   return new DeployError(message, status, json);
 }
 
-async function fetchWithRetry(url: string, init: RequestInit, attempts = 3): Promise<Response> {
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 3, options: { retryServerErrors?: boolean } = {}): Promise<Response> {
   // Non-idempotent methods (POST/PATCH) may already have committed before a 5xx
   // is returned, so retrying a 5xx would mint duplicate resources (immutable
   // versions, orphan D1 databases, duplicate IdPs). A 429 is always safe to
   // retry — the request was rate-limited, not processed. Idempotent verbs retry
   // both 429 and 5xx.
   const method = (init.method ?? 'GET').toUpperCase();
-  const nonIdempotent = method === 'POST' || method === 'PATCH';
+  const nonIdempotent = method === 'POST' || method === 'PATCH' || options.retryServerErrors === false;
   let last: Response | undefined;
   for (let i = 0; i < attempts; i += 1) {
     const resp = await fetch(url, init);
@@ -119,13 +119,44 @@ async function listCloudflareAllPages(config: WorkersDeployConfig, path: string,
     }
     if (json.success !== true || !Array.isArray(json.result)) return [];
     all.push(...(json.result as JsonObject[]));
-    const info = (json.result_info ?? {}) as JsonObject;
-    const totalPages = typeof info.total_pages === 'number' && info.total_pages > 0
-      ? info.total_pages
-      : typeof info.total_count === 'number' && info.total_count > 0
-        ? Math.ceil(info.total_count / perPage)
-        : 1;
-    if (page >= totalPages) return all;
+    const result = json.result as JsonObject[];
+    if (!cloudflareListHasMorePages(json, result.length, page, perPage)) return all;
+    page += 1;
+  }
+}
+
+// Cloudflare list envelopes are inconsistent: Workers scripts carry
+// `result_info.total_pages`, D1 and Access carry `total_count`/`count`/`page`/
+// `per_page` only. When neither is present, keep paging while a page is full.
+function cloudflareListHasMorePages(json: JsonObject, pageLength: number, page: number, perPage: number): boolean {
+  if (pageLength === 0) return false;
+  const info = (json.result_info ?? {}) as JsonObject;
+  if (typeof info.total_pages === 'number' && info.total_pages > 0) return page < info.total_pages;
+  if (typeof info.total_count === 'number' && info.total_count > 0) return page < Math.ceil(info.total_count / perPage);
+  return pageLength >= perPage;
+}
+
+// Fail-closed variant for the deploy path: a list failure (429 exhausted, 5xx,
+// missing read scope, malformed body) throws instead of degrading to `[]`,
+// because every deploy-path caller treats `[]` as "does not exist" and then
+// POSTs a duplicate (D1/R2/IdP) or falls back to a post-PUT Access create.
+async function listCloudflareAllPagesStrict(config: WorkersDeployConfig, path: string, perPage = 100, what = 'Cloudflare list'): Promise<JsonObject[]> {
+  const base = CLOUDFLARE_API + path;
+  const all: JsonObject[] = [];
+  let page = 1;
+  for (;;) {
+    const sep = path.includes('?') ? '&' : '?';
+    const resp = await fetchWithRetry(
+      base + sep + 'page=' + page + '&per_page=' + perPage,
+      { method: 'GET', headers: cloudflareHeaders(config.token) },
+    );
+    const json = await readCloudflareJson(resp);
+    if (!resp.ok || json.success !== true || !Array.isArray(json.result)) {
+      throw cloudflareError(json, resp.ok ? 502 : resp.status, what + ' failed.');
+    }
+    const result = json.result as JsonObject[];
+    all.push(...result);
+    if (!cloudflareListHasMorePages(json, result.length, page, perPage)) return all;
     page += 1;
   }
 }
@@ -273,17 +304,54 @@ function workerMetadata(config: WorkersDeployConfig, assetsJwt?: string, runWork
   return metadata;
 }
 
-async function uploadWorkerScript(config: WorkersDeployConfig, scriptName: string, moduleCode: string, assetsJwt: string, runWorkerFirst = false): Promise<JsonObject> {
-  const form = new FormData();
-  form.append('metadata', new Blob([JSON.stringify(workerMetadata(config, assetsJwt, runWorkerFirst))], { type: 'application/json' }));
-  form.append('index.js', new Blob([moduleCode], { type: 'application/javascript+module' }), 'index.js');
-  const resp = await fetchWithRetry(
-    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts/' + encodeURIComponent(scriptName),
-    { method: 'PUT', headers: cloudflareHeaders(config.token), body: form },
+async function getCloudflareWorkerScript(config: WorkersDeployConfig, scriptName: string): Promise<JsonObject | null> {
+  const scripts = await listCloudflareAllPagesStrict(
+    config,
+    '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts',
+    100,
+    'Cloudflare Workers scripts list',
   );
-  const json = await readCloudflareJson(resp);
-  if (!resp.ok || json.success === false) throw cloudflareError(json, resp.status, 'Cloudflare Workers script upload failed.');
-  return json;
+  return scripts.find((item) => item?.id === scriptName) ?? null;
+}
+
+// The script PUT consumes the assets completion JWT. A 5xx may arrive AFTER the
+// PUT committed, in which case a blind retry fails with a JWT error while the
+// new version is already live. So: never retry the PUT on 5xx blindly — check
+// whether the script's modified_on advanced past this deploy's start first.
+async function uploadWorkerScript(
+  config: WorkersDeployConfig,
+  scriptName: string,
+  moduleCode: string,
+  assetsJwt: string,
+  runWorkerFirst = false,
+  startedAt = Date.now(),
+): Promise<JsonObject> {
+  const url = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts/' + encodeURIComponent(scriptName);
+  let lastJson: JsonObject = {};
+  let lastStatus = 502;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(workerMetadata(config, assetsJwt, runWorkerFirst))], { type: 'application/json' }));
+    form.append('index.js', new Blob([moduleCode], { type: 'application/javascript+module' }), 'index.js');
+    const resp = await fetchWithRetry(url, { method: 'PUT', headers: cloudflareHeaders(config.token), body: form }, 3, { retryServerErrors: false });
+    const json = await readCloudflareJson(resp);
+    if (resp.ok && json.success !== false) return json;
+    lastJson = json;
+    lastStatus = resp.status;
+    const is5xx = resp.status >= 500 && resp.status < 600;
+    if (!is5xx) break;
+    let committed = false;
+    try {
+      const script = await getCloudflareWorkerScript(config, scriptName);
+      const modifiedOn = typeof script?.modified_on === 'string' ? Date.parse(script.modified_on) : NaN;
+      committed = Number.isFinite(modifiedOn) && modifiedOn >= startedAt - 1000;
+    } catch {
+      committed = false;
+    }
+    if (committed) return { success: true, result: { id: scriptName, committed_after_5xx: true } };
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 200 * 2 ** attempt));
+  }
+  throw cloudflareError(lastJson, lastStatus, 'Cloudflare Workers script upload failed.');
 }
 
 async function uploadWorkerVersion(config: WorkersDeployConfig, scriptName: string, moduleCode: string, assetsJwt: string, runWorkerFirst = false): Promise<string> {
@@ -308,15 +376,38 @@ async function readAccountSubdomain(config: WorkersDeployConfig): Promise<string
   const json = await readCloudflareJson(resp);
   if (!resp.ok || json.success === false) throw cloudflareError(json, resp.status, 'Cloudflare workers.dev subdomain lookup failed.');
   const subdomain = (json.result ?? {}) as JsonObject;
-  if (typeof subdomain.subdomain !== 'string' || !subdomain.subdomain) {
-    throw new DeployError(
-      'This Cloudflare account has no workers.dev subdomain. Set one in the Cloudflare dashboard before deploying.',
-      400,
-      undefined,
-      'CFW_SUBDOMAIN_FAILED',
-    );
-  }
-  return subdomain.subdomain;
+  return typeof subdomain.subdomain === 'string' ? subdomain.subdomain : '';
+}
+
+function noWorkersDevSubdomainError(): DeployError {
+  return new DeployError(
+    'This Cloudflare account has no workers.dev subdomain. Set one in the Cloudflare dashboard (or configure a custom domain) before deploying.',
+    400,
+    undefined,
+    'CFW_SUBDOMAIN_FAILED',
+  );
+}
+
+// Preview URLs only resolve when the script's subdomain config has
+// previews_enabled. Turn it on without changing the production workers.dev
+// exposure state (a preview deploy must not flip production public).
+async function ensureWorkerPreviewsEnabled(config: WorkersDeployConfig, scriptName: string): Promise<void> {
+  const url = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts/' + encodeURIComponent(scriptName) + '/subdomain';
+  const getResp = await fetchWithRetry(url, { method: 'GET', headers: cloudflareHeaders(config.token) });
+  const getJson = await readCloudflareJson(getResp);
+  if (!getResp.ok || getJson.success === false) throw cloudflareError(getJson, getResp.status, 'Cloudflare workers.dev subdomain config lookup failed.');
+  const current = (getJson.result ?? {}) as JsonObject;
+  if (current.previews_enabled === true) return;
+  const resp = await fetchWithRetry(
+    url,
+    {
+      method: 'POST',
+      headers: cloudflareHeaders(config.token, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ enabled: current.enabled === true, previews_enabled: true }),
+    },
+  );
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success === false) throw cloudflareError(json, resp.status, 'Cloudflare workers.dev preview enable failed.');
 }
 
 async function enableWorkerSubdomain(config: WorkersDeployConfig, scriptName: string, subdomain: string): Promise<string> {
@@ -357,9 +448,11 @@ async function resolveCloudflareSelfEmail(token: string): Promise<string> {
 }
 
 async function getCloudflareWorkerTag(config: WorkersDeployConfig, scriptName: string): Promise<string> {
-  const scripts = await listCloudflareAllPages(
+  const scripts = await listCloudflareAllPagesStrict(
     config,
     '/accounts/' + encodeURIComponent(config.accountId) + '/workers/scripts',
+    100,
+    'Cloudflare Workers scripts list',
   );
   const script = scripts.find((item) => item?.id === scriptName);
   return typeof script?.tag === 'string' ? script.tag : '';
@@ -371,9 +464,11 @@ async function getCloudflareWorkerTag(config: WorkersDeployConfig, scriptName: s
 // and pin the app to it via `allowed_idps`.
 async function ensureCloudflareOtpIdentityProvider(config: WorkersDeployConfig): Promise<string> {
   const base = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/identity_providers';
-  const providers = await listCloudflareAllPages(
+  const providers = await listCloudflareAllPagesStrict(
     config,
     '/accounts/' + encodeURIComponent(config.accountId) + '/access/identity_providers',
+    100,
+    'Cloudflare Access identity providers list',
   );
   const existing = providers.find((p) => p?.type === 'onetimepin');
   if (existing && typeof existing.id === 'string') return existing.id;
@@ -422,21 +517,22 @@ async function findCloudflareAccessAppByWorker(config: WorkersDeployConfig, work
       return dests.some((d) => d?.type === 'worker' && d?.worker_id === workerId);
     });
     if (match) return match;
-    const info = (json.result_info ?? {}) as JsonObject;
-    const totalPages = typeof info.total_pages === 'number' && info.total_pages > 0
-      ? info.total_pages
-      : typeof info.total_count === 'number' && info.total_count > 0
-        ? Math.ceil(info.total_count / 100)
-        : 1;
-    if (page >= totalPages || apps.length === 0) return null;
+    if (!cloudflareListHasMorePages(json, apps.length, page, 100)) return null;
     page += 1;
   }
 }
 
 async function createCloudflareAccessApp(
   config: WorkersDeployConfig,
-  input: { scriptName: string; rule: CloudflareWorkersAccessRule; includePreview: boolean },
-): Promise<{ appId: string }> {
+  input: {
+    scriptName: string;
+    rule: CloudflareWorkersAccessRule;
+    includePreview: boolean;
+    workerId?: string;
+    customDomain?: { hostname: string; zoneId: string } | undefined;
+    priorAccessAppId?: string | undefined;
+  },
+): Promise<{ appId: string; workerId: string }> {
   const selfEmail = input.rule.kind === 'self' ? await resolveCloudflareSelfEmail(config.token) : '';
   if (input.rule.kind === 'self' && !selfEmail) {
     throw new DeployError(
@@ -448,7 +544,7 @@ async function createCloudflareAccessApp(
   }
   // Access destinations key on the Worker's tag (a UUID from GET /workers/scripts),
   // not its script name — the name is rejected with "worker_id ... is invalid".
-  const workerId = await getCloudflareWorkerTag(config, input.scriptName);
+  const workerId = input.workerId || await getCloudflareWorkerTag(config, input.scriptName);
   if (!workerId) {
     throw new DeployError(
       'Could not resolve the Cloudflare Worker tag for "' + input.scriptName + '".',
@@ -459,6 +555,10 @@ async function createCloudflareAccessApp(
   }
   const destinations: JsonObject[] = [{ type: 'worker', worker_id: workerId }];
   if (input.includePreview) destinations.push({ type: 'preview_worker', worker_id: workerId });
+  // A worker-tag destination covers workers.dev + preview URLs only. A custom
+  // hostname is a zone hostname and needs its own `public` destination, or the
+  // site is served unprotected on the custom domain.
+  if (input.customDomain?.hostname) destinations.push({ type: 'public', uri: input.customDomain.hostname });
   const body: JsonObject = {
     name: input.scriptName + ' (OpenDesign)',
     type: 'self_hosted',
@@ -479,6 +579,18 @@ async function createCloudflareAccessApp(
   }
   const existing = await findCloudflareAccessAppByWorker(config, workerId);
   const existingId = existing && typeof existing.id === 'string' ? existing.id : '';
+  // Only replace an app we created (the id recorded by our previous deploy).
+  // A user-managed Access app that claims this Worker must not be overwritten
+  // with our OTP + email rule and later deleted when Access is switched off.
+  if (existingId && existingId !== input.priorAccessAppId) {
+    const name = typeof existing?.name === 'string' ? existing.name : existingId;
+    throw new DeployError(
+      'Cloudflare Access app "' + name + '" already protects this Worker but was not created by OpenDesign. Remove it or turn off OpenDesign Access to continue.',
+      409,
+      { appId: existingId, name },
+      'CFW_ACCESS_APP_FOREIGN',
+    );
+  }
   const path = existingId
     ? CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps/' + encodeURIComponent(existingId)
     : CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps';
@@ -497,7 +609,72 @@ async function createCloudflareAccessApp(
   const result = (json.result ?? {}) as JsonObject;
   const appId = typeof result.id === 'string' ? result.id : existingId;
   if (!appId) throw new DeployError('Cloudflare Access app returned no app id.', 502, undefined, 'CFW_ACCESS_CREATE_FAILED');
-  return { appId };
+  return { appId, workerId };
+}
+
+// Hard post-deploy assertion: every URL a deploy with Access enabled reports
+// must answer with an Access login redirect. This holds regardless of any
+// future ordering bug in the steps above.
+async function verifyCloudflareAccessPerimeter(urls: string[]): Promise<void> {
+  for (const url of urls) {
+    let resp: Response;
+    try {
+      resp = await fetch(url, { method: 'HEAD', redirect: 'manual' });
+    } catch (err) {
+      throw new DeployError(
+        'Could not verify Cloudflare Access on ' + url + ': ' + String((err as Error)?.message || err),
+        502,
+        { url },
+        'CFW_ACCESS_UNVERIFIED',
+      );
+    }
+    const location = resp.headers?.get?.('location') || '';
+    if (!isCloudflareAccessRedirect(resp.status, location)) {
+      throw new DeployError(
+        url + ' is not behind Cloudflare Access (HTTP ' + resp.status + '). The deploy was not marked ready.',
+        502,
+        { url, status: resp.status },
+        'CFW_ACCESS_UNVERIFIED',
+      );
+    }
+  }
+}
+
+function accessAppReferencesWorker(app: JsonObject | null, workerId: string): boolean {
+  const dests = Array.isArray(app?.destinations) ? (app!.destinations as JsonObject[]) : [];
+  return dests.some((d) => (d?.type === 'worker' || d?.type === 'preview_worker') && d?.worker_id === workerId);
+}
+
+async function getCloudflareAccessApp(config: WorkersDeployConfig, appId: string): Promise<JsonObject | null> {
+  const resp = await fetchWithRetry(
+    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps/' + encodeURIComponent(appId),
+    { method: 'GET', headers: cloudflareHeaders(config.token) },
+  );
+  if (resp.status === 404) return null;
+  const json = await readCloudflareJson(resp);
+  if (!resp.ok || json.success === false) throw cloudflareError(json, resp.status, 'Cloudflare Access app lookup failed.');
+  return (json.result ?? null) as JsonObject | null;
+}
+
+// Retire the Access app recorded by the previous deploy — but only when it
+// still guards THIS Worker. After a scriptName change the prior app protects
+// the still-live old Worker; deleting it would make that Worker public.
+async function retirePriorAccessApp(
+  config: WorkersDeployConfig,
+  priorAccessAppId: string,
+  workerId: string,
+  steps: DeployStep[],
+): Promise<void> {
+  try {
+    const prior = await getCloudflareAccessApp(config, priorAccessAppId);
+    if (prior && !accessAppReferencesWorker(prior, workerId)) {
+      steps.push({ name: 'access-app-prior-retained', status: 'done', detail: priorAccessAppId });
+      return;
+    }
+    await deleteCloudflareAccessApp(config, priorAccessAppId);
+  } catch {
+    // best-effort: a stale Access app may linger; the current app still governs.
+  }
 }
 
 async function deleteCloudflareAccessApp(config: WorkersDeployConfig, appId: string): Promise<void> {
@@ -527,6 +704,7 @@ export async function deployToCloudflareWorkers(input: {
   priorAccessAppId?: string;
   customDomain?: { hostname: string; zoneId: string } | undefined;
 }): Promise<CloudflareWorkersDeployResult> {
+  const startedAt = Date.now();
   const { config, files, projectId = '', projectName = '', target = 'production', access, priorAccessAppId, customDomain } = input ?? {};
   const accountId = config?.accountId;
   if (!accountId) throw new DeployError('Cloudflare account ID is required.', 400, undefined, 'CFW_ACCOUNT_ID_REQUIRED');
@@ -535,6 +713,10 @@ export async function deployToCloudflareWorkers(input: {
   if (access?.enabled && !access.rule) {
     throw new DeployError('Cloudflare Access is enabled but has no rule — add an email, domain, or policy.', 400, undefined, 'CFW_ACCESS_EMPTY_RULE');
   }
+  const accessOn = Boolean(access?.enabled && access.rule);
+  // Validate bindings before any network call (a `[null]` binding used to
+  // TypeError inside workerMetadata after the assets were already uploaded).
+  const validatedBindings = normalizeCloudflareWorkersBindings(config.bindings);
   // Resolve the live credential: the configured static API token in 'token'
   // mode, or the rotating OAuth access token (refreshed behind a single-flight
   // lock in deploy.ts) in 'oauth' mode.
@@ -552,8 +734,11 @@ export async function deployToCloudflareWorkers(input: {
     scriptName: config.scriptName,
     compatibilityDate: config.compatibilityDate,
     credentialMode: config.credentialMode,
-    bindings: config.bindings,
+    bindings: validatedBindings,
   };
+  // The ensure calls ARE the capability check: they succeed only when R2/D1 are
+  // enabled and the token can reach them. (A separate unretried probe after
+  // them used to flip a fresh success into CFW_R2_UNAVAILABLE on one 429.)
   if (cfg.bindings && cfg.bindings.length > 0) {
     const resolved = cfg.bindings.map((binding) => ({ ...binding }));
     for (const binding of resolved) {
@@ -566,14 +751,6 @@ export async function deployToCloudflareWorkers(input: {
     }
     cfg.bindings = resolved;
   }
-  const bindingTypes = new Set((cfg.bindings || []).map((b) => b.type));
-  const needsR2 = bindingTypes.has('r2_bucket');
-  const needsD1 = bindingTypes.has('d1');
-  if (needsR2 || needsD1) {
-    const caps = await probeCloudflareWorkersCapabilities({ token: cfg.token, accountId: cfg.accountId });
-    if (needsR2 && !caps.r2) throw new DeployError('Cloudflare R2 is not enabled on this account. Enable R2 in the dashboard.', 400, undefined, 'CFW_R2_UNAVAILABLE');
-    if (needsD1 && !caps.d1) throw new DeployError('This Cloudflare token lacks D1 permission.', 400, undefined, 'CFW_D1_UNAVAILABLE');
-  }
 
   const steps: DeployStep[] = [];
   try {
@@ -581,45 +758,58 @@ export async function deployToCloudflareWorkers(input: {
     const { moduleCode, assetFiles } = splitWorkerModule(files);
     const isCustomModule = moduleCode !== DEFAULT_WORKER_MODULE;
     const { manifest, hashToFile } = buildCloudflareWorkersManifest(assetFiles);
-    const session = await startAssetsUploadSession(cfg, scriptName, manifest);
-    const completionJwt = await uploadAssetBuckets(cfg, session.jwt, session.buckets, hashToFile);
-    steps.push({ name: 'assets', status: 'done', detail: String(assetFiles.length) });
 
     if (target === 'preview') {
+      // A version upload needs an existing script, and preview URLs need the
+      // account subdomain — check both before uploading any asset.
+      const workerId = await getCloudflareWorkerTag(cfg, scriptName);
+      if (!workerId) {
+        throw new DeployError(
+          'Preview deploys need a production deploy first: the Worker "' + scriptName + '" does not exist yet.',
+          400,
+          undefined,
+          'CFW_PREVIEW_REQUIRES_PRODUCTION',
+        );
+      }
       const subdomain = await readAccountSubdomain(cfg);
-      const versionId = await uploadWorkerVersion(cfg, scriptName, moduleCode, completionJwt, isCustomModule);
-      steps.push({ name: 'version', status: 'done' });
-      const metadata: JsonObject = { scriptName, versionId };
-      if (access?.enabled && access.rule) {
+      if (!subdomain) throw noWorkersDevSubdomainError();
+      const session = await startAssetsUploadSession(cfg, scriptName, manifest);
+      const completionJwt = await uploadAssetBuckets(cfg, session.jwt, session.buckets, hashToFile);
+      steps.push({ name: 'assets', status: 'done', detail: String(assetFiles.length) });
+      const metadata: JsonObject = { scriptName };
+      if (accessOn) {
+        // Preview URLs are covered by the preview_worker destination; make sure
+        // the app exists BEFORE the version goes live.
         const app = await createCloudflareAccessApp(cfg, {
           scriptName,
-          rule: access.rule,
+          rule: access!.rule!,
           includePreview: true,
+          workerId,
+          customDomain,
+          priorAccessAppId,
         });
         metadata.accessProtected = true;
         metadata.accessAppId = app.appId;
         metadata.createdByOpenDesign = true;
         steps.push({ name: 'access-app', status: 'done', detail: app.appId });
-        if (priorAccessAppId && priorAccessAppId !== app.appId) {
-          try {
-            await deleteCloudflareAccessApp(cfg, priorAccessAppId);
-          } catch {
-            // best-effort: a stale Access app may linger; the new app still governs.
-          }
-        }
-      } else if (priorAccessAppId) {
-        try {
-          await deleteCloudflareAccessApp(cfg, priorAccessAppId);
-        } catch {
-          // best-effort: a lingering stale app is benign; throwing after the
-          // live PUT is not.
-        }
+      }
+      // A preview deploy never reconciles (deletes) the production Access app:
+      // flipping Access off and running a preview must not expose production.
+      const versionId = await uploadWorkerVersion(cfg, scriptName, moduleCode, completionJwt, isCustomModule);
+      metadata.versionId = versionId;
+      steps.push({ name: 'version', status: 'done' });
+      await ensureWorkerPreviewsEnabled(cfg, scriptName);
+      steps.push({ name: 'previews', status: 'done' });
+      const prefix = versionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'preview';
+      const url = 'https://' + prefix + '-' + scriptName + '.' + subdomain + '.workers.dev';
+      if (accessOn) {
+        await verifyCloudflareAccessPerimeter([url]);
+        metadata.accessVerified = true;
       }
       metadata.steps = steps;
-      const prefix = versionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'preview';
       return {
         providerId: CLOUDFLARE_WORKERS_PROVIDER_ID,
-        url: 'https://' + prefix + '-' + scriptName + '.' + subdomain + '.workers.dev',
+        url,
         deploymentId: versionId,
         target,
         status: 'ready',
@@ -628,71 +818,79 @@ export async function deployToCloudflareWorkers(input: {
       };
     }
 
+    // Production. Resolve everything that can fail BEFORE the live script PUT:
+    // the account subdomain (an account with none and no custom domain cannot
+    // deploy — better to learn that before a new version is live) and the
+    // Worker tag (needed for the Access destination).
+    const subdomain = await readAccountSubdomain(cfg);
+    if (!subdomain && !customDomain) throw noWorkersDevSubdomainError();
+    const session = await startAssetsUploadSession(cfg, scriptName, manifest);
+    const completionJwt = await uploadAssetBuckets(cfg, session.jwt, session.buckets, hashToFile);
+    steps.push({ name: 'assets', status: 'done', detail: String(assetFiles.length) });
+
     // Create/update the Access app BEFORE the live script PUT so there is never
     // a window where the Worker is live but unprotected. On a first deploy the
     // Worker has no tag yet (getCloudflareWorkerTag returns ''), so fall back to
     // post-PUT creation in that case.
     const metadata: JsonObject = { scriptName };
-    let accessAppCreatedBeforePut = false;
-    if (access?.enabled && access.rule) {
-      const workerId = await getCloudflareWorkerTag(cfg, scriptName);
-      if (workerId) {
-        const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access.rule, includePreview: true });
-        metadata.accessProtected = true;
-        metadata.accessAppId = app.appId;
-        metadata.createdByOpenDesign = true;
-        steps.push({ name: 'access-app', status: 'done', detail: app.appId });
-        accessAppCreatedBeforePut = true;
-        if (priorAccessAppId && priorAccessAppId !== app.appId) {
-          try {
-            await deleteCloudflareAccessApp(cfg, priorAccessAppId);
-          } catch {
-            // best-effort: a stale Access app may linger; the new app still governs.
-          }
-        }
-      }
-    }
-
-    await uploadWorkerScript(cfg, scriptName, moduleCode, completionJwt, isCustomModule);
-    steps.push({ name: 'script', status: 'done' });
-    const subdomain = await readAccountSubdomain(cfg);
-    const url = 'https://' + scriptName + '.' + subdomain + '.workers.dev';
-    if (access?.enabled && access.rule && !accessAppCreatedBeforePut) {
-      // First deploy: the Worker now exists, so its tag is resolvable.
-      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access.rule, includePreview: true });
+    let workerId = accessOn || priorAccessAppId ? await getCloudflareWorkerTag(cfg, scriptName) : '';
+    let accessAppId = '';
+    if (accessOn && workerId) {
+      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, workerId, customDomain, priorAccessAppId });
+      accessAppId = app.appId;
       metadata.accessProtected = true;
       metadata.accessAppId = app.appId;
       metadata.createdByOpenDesign = true;
       steps.push({ name: 'access-app', status: 'done', detail: app.appId });
-      if (priorAccessAppId && priorAccessAppId !== app.appId) {
-        try {
-          await deleteCloudflareAccessApp(cfg, priorAccessAppId);
-        } catch {
-          // best-effort: a stale Access app may linger; the new app still governs.
-        }
-      }
-    } else if (priorAccessAppId && !(access?.enabled && access.rule)) {
-      try {
-        await deleteCloudflareAccessApp(cfg, priorAccessAppId);
-      } catch {
-        // best-effort: a lingering stale app is benign; throwing after the
-        // live PUT is not.
-      }
     }
-    await enableWorkerSubdomain(cfg, scriptName, subdomain);
-    steps.push({ name: 'subdomain', status: 'done', detail: url });
-    try {
-      const checkResp = await fetch(url, { method: 'HEAD', redirect: 'manual' });
-      const check: JsonObject = { status: checkResp.status, ok: checkResp.ok };
-      if (checkResp.status >= 500 || checkResp.status === 1101) check.detail = 'worker-runtime-error';
-      metadata.check = check;
-    } catch {
-      // A failed post-deploy probe is non-fatal; the deploy still succeeded.
+
+    await uploadWorkerScript(cfg, scriptName, moduleCode, completionJwt, isCustomModule, startedAt);
+    steps.push({ name: 'script', status: 'done' });
+    if (accessOn && !accessAppId) {
+      // First deploy: the Worker now exists, so its tag is resolvable.
+      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, customDomain, priorAccessAppId });
+      accessAppId = app.appId;
+      workerId = app.workerId;
+      metadata.accessProtected = true;
+      metadata.accessAppId = app.appId;
+      metadata.createdByOpenDesign = true;
+      steps.push({ name: 'access-app', status: 'done', detail: app.appId });
+    }
+    // Reconcile the previously recorded app: delete it only when it is not the
+    // app now governing this Worker AND it still points at this Worker (after a
+    // scriptName change it protects the still-live old Worker — keep it).
+    if (priorAccessAppId && priorAccessAppId !== accessAppId) {
+      await retirePriorAccessApp(cfg, priorAccessAppId, workerId, steps);
+    }
+
+    let url = customDomain ? 'https://' + customDomain.hostname : '';
+    if (subdomain) {
+      url = await enableWorkerSubdomain(cfg, scriptName, subdomain);
+      steps.push({ name: 'subdomain', status: 'done', detail: url });
     }
     if (customDomain) {
-      await attachCloudflareWorkerDomain(cfg, { hostname: customDomain.hostname, service: scriptName, zone_id: customDomain.zoneId });
-      metadata.customDomain = { hostname: customDomain.hostname, url: 'https://' + customDomain.hostname };
+      const domainId = await attachCloudflareWorkerDomain(cfg, { hostname: customDomain.hostname, service: scriptName, zone_id: customDomain.zoneId });
+      const customUrl = 'https://' + customDomain.hostname;
+      metadata.customDomain = domainId
+        ? { id: domainId, hostname: customDomain.hostname, url: customUrl }
+        : { hostname: customDomain.hostname, url: customUrl };
       steps.push({ name: 'custom-domain', status: 'done', detail: customDomain.hostname });
+    }
+    const publicUrls = [url, ...(customDomain && url !== 'https://' + customDomain.hostname ? ['https://' + customDomain.hostname] : [])];
+    if (accessOn) {
+      // Hard constraint: a deploy with Access on is only `ready` when every URL
+      // it reports actually challenges with an Access login.
+      await verifyCloudflareAccessPerimeter(publicUrls);
+      metadata.accessVerified = true;
+    } else {
+      try {
+        const checkResp = await fetch(url, { method: 'HEAD', redirect: 'manual' });
+        const check: JsonObject = { status: checkResp.status, ok: checkResp.ok };
+        if (checkResp.status >= 500 || checkResp.status === 1101) check.detail = 'worker-runtime-error';
+        metadata.check = check;
+      } catch {
+        // A failed post-deploy probe is non-fatal; the deploy still succeeded.
+      }
     }
     metadata.steps = steps;
     return {
@@ -785,15 +983,26 @@ export type CloudflareD1Database = { name: string; id: string };
 export async function listCloudflareR2Buckets(
   token: string,
   accountId: string,
+  options: { strict?: boolean; nameContains?: string } = {},
 ): Promise<CloudflareR2Bucket[]> {
   const base = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(accountId) + '/r2/buckets';
   const out: CloudflareR2Bucket[] = [];
   let cursor: string | undefined;
   for (;;) {
-    const url = base + (cursor ? '?cursor=' + encodeURIComponent(cursor) : '');
-    const resp = await fetch(url, { headers: cloudflareHeaders(token) });
+    const params = new URLSearchParams({ per_page: '1000' });
+    if (options.nameContains) params.set('name_contains', options.nameContains);
+    if (cursor) params.set('cursor', cursor);
+    const url = base + '?' + params.toString();
+    const resp = options.strict
+      ? await fetchWithRetry(url, { method: 'GET', headers: cloudflareHeaders(token) })
+      : await fetch(url, { headers: cloudflareHeaders(token) });
     const json = (await resp.json().catch(() => ({}))) as JsonObject;
-    if (!resp.ok || json.success !== true) return out;
+    if (!resp.ok || json.success !== true) {
+      // The deploy path (strict) must fail closed: `[]` means "create it" to
+      // ensureCloudflareR2Bucket, which would then hit "bucket already exists".
+      if (options.strict) throw cloudflareError(json, resp.ok ? 502 : resp.status, 'Cloudflare R2 bucket list failed.');
+      return out;
+    }
     const result = json.result as JsonObject | undefined;
     const buckets = Array.isArray(result?.buckets) ? (result.buckets as JsonObject[]) : [];
     for (const bucket of buckets) {
@@ -827,9 +1036,16 @@ export async function listCloudflareD1Databases(
 /** Resolve a D1 database by human name, creating it when it does not exist.
  * Returns the database uuid a Workers binding needs. */
 export async function ensureCloudflareD1Database(config: WorkersDeployConfig, databaseName: string): Promise<string> {
-  const existing = await listCloudflareD1Databases(config.token, config.accountId);
-  const match = existing.find((db) => db.name === databaseName);
-  if (match) return match.id;
+  // Exact-name filter + fail-closed list: a degraded `[]` here would POST a
+  // duplicate database instead of reusing the existing one.
+  const existing = await listCloudflareAllPagesStrict(
+    config,
+    '/accounts/' + encodeURIComponent(config.accountId) + '/d1/database?name=' + encodeURIComponent(databaseName),
+    100,
+    'Cloudflare D1 database list',
+  );
+  const match = existing.find((db) => db?.name === databaseName && typeof db?.uuid === 'string' && db.uuid);
+  if (match) return String(match.uuid);
   const resp = await fetchWithRetry(
     CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/d1/database',
     { method: 'POST', headers: cloudflareHeaders(config.token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ name: databaseName }) },
@@ -843,7 +1059,7 @@ export async function ensureCloudflareD1Database(config: WorkersDeployConfig, da
 /** Resolve an R2 bucket by name, creating it when it does not exist. The
  * bucket name is the identifier, so it is returned unchanged. */
 export async function ensureCloudflareR2Bucket(config: WorkersDeployConfig, bucketName: string): Promise<string> {
-  const existing = await listCloudflareR2Buckets(config.token, config.accountId);
+  const existing = await listCloudflareR2Buckets(config.token, config.accountId, { strict: true, nameContains: bucketName });
   if (existing.some((bucket) => bucket.name === bucketName)) return bucketName;
   const resp = await fetchWithRetry(
     CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/r2/buckets',
@@ -876,7 +1092,7 @@ export async function listCloudflareZones(config: WorkersDeployConfig): Promise<
 export async function attachCloudflareWorkerDomain(
   config: WorkersDeployConfig,
   input: { hostname: string; service: string; zone_id: string },
-): Promise<void> {
+): Promise<string> {
   const resp = await fetchWithRetry(
     CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/workers/domains',
     {
@@ -896,6 +1112,8 @@ export async function attachCloudflareWorkerDomain(
     }
     throw cloudflareError(json, resp.status, 'Cloudflare Workers custom domain attach failed.');
   }
+  const result = (json.result ?? {}) as JsonObject;
+  return result.id !== undefined && result.id !== null ? String(result.id) : '';
 }
 
 /** Detach a custom domain from Workers. A 404 means the hostname is already

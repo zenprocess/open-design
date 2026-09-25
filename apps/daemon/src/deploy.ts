@@ -86,7 +86,7 @@ const VERCEL_PROTECTED_MESSAGE =
 const CLOUDFLARE_ACCESS_PROTECTED_MESSAGE =
   'Deployment is protected by Cloudflare Access. Authorized users must sign in to open it.';
 
-function isCloudflareAccessRedirect(status: number, location: string): boolean {
+export function isCloudflareAccessRedirect(status: number, location: string): boolean {
   if (status < 300 || status >= 400) return false;
   return /cloudflareaccess\.com/i.test(location);
 }
@@ -250,16 +250,74 @@ export function publicCloudflarePagesConfig(config: Partial<DeployConfig>) {
 function normalizeCloudflareWorkersAccessRule(rule: unknown): CloudflareWorkersAccessRule | undefined {
   if (!rule || typeof rule !== 'object') return undefined;
   const r = rule as JsonObject;
+  // An empty rule (`emails: []`, blank domain) is a truthy object that would
+  // pass the "enabled but no rule" checks and only fail inside the Access app
+  // create — after the IdP and (on a first deploy) the live script PUT. Return
+  // undefined so the write-time validation rejects it up front.
   if (r.kind === 'emails') {
-    return {
-      kind: 'emails',
-      emails: Array.isArray(r.emails) ? r.emails.filter((e): e is string => typeof e === 'string') : [],
-    };
+    const emails = Array.isArray(r.emails)
+      ? r.emails.filter((e): e is string => typeof e === 'string').map((e) => e.trim()).filter(Boolean)
+      : [];
+    return emails.length > 0 ? { kind: 'emails', emails } : undefined;
   }
-  if (r.kind === 'emailDomain') return typeof r.emailDomain === 'string' ? { kind: 'emailDomain', emailDomain: r.emailDomain } : undefined;
+  if (r.kind === 'emailDomain') {
+    const emailDomain = typeof r.emailDomain === 'string' ? r.emailDomain.trim() : '';
+    return emailDomain ? { kind: 'emailDomain', emailDomain } : undefined;
+  }
   if (r.kind === 'self') return { kind: 'self' };
-  if (r.kind === 'policy') return typeof r.policyId === 'string' ? { kind: 'policy', policyId: r.policyId } : undefined;
+  if (r.kind === 'policy') {
+    const policyId = typeof r.policyId === 'string' ? r.policyId.trim() : '';
+    return policyId ? { kind: 'policy', policyId } : undefined;
+  }
   return undefined;
+}
+
+const CLOUDFLARE_WORKERS_BINDING_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CLOUDFLARE_WORKERS_RESERVED_BINDING_NAMES = new Set(['ASSETS']);
+
+/** Validate the Workers bindings a config carries. Throws a DeployError
+ * (`CFW_BINDINGS_INVALID`) instead of letting a malformed entry TypeError at
+ * deploy time after the assets were uploaded, or letting a user binding named
+ * `ASSETS` collide with the injected assets binding. */
+export function normalizeCloudflareWorkersBindings(
+  value: unknown,
+): Array<{ type: string; name: string; bucketName?: string; databaseName?: string; id?: string }> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new DeployError('Cloudflare Workers bindings must be an array.', 400, undefined, 'CFW_BINDINGS_INVALID');
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new DeployError('Cloudflare Workers binding #' + (index + 1) + ' must be an object.', 400, undefined, 'CFW_BINDINGS_INVALID');
+    }
+    const b = entry as JsonObject;
+    const type = typeof b.type === 'string' ? b.type.trim() : '';
+    const name = typeof b.name === 'string' ? b.name.trim() : '';
+    if (!type) throw new DeployError('Cloudflare Workers binding #' + (index + 1) + ' needs a string "type".', 400, undefined, 'CFW_BINDINGS_INVALID');
+    if (!CLOUDFLARE_WORKERS_BINDING_NAME.test(name)) {
+      throw new DeployError('Cloudflare Workers binding name "' + name + '" is invalid (letters, digits and underscores; cannot start with a digit).', 400, undefined, 'CFW_BINDINGS_INVALID');
+    }
+    if (CLOUDFLARE_WORKERS_RESERVED_BINDING_NAMES.has(name)) {
+      throw new DeployError('Cloudflare Workers binding name "' + name + '" is reserved for the static assets binding.', 400, undefined, 'CFW_BINDINGS_INVALID');
+    }
+    if (seen.has(name)) throw new DeployError('Cloudflare Workers binding name "' + name + '" is duplicated.', 400, undefined, 'CFW_BINDINGS_INVALID');
+    seen.add(name);
+    const out: { type: string; name: string; bucketName?: string; databaseName?: string; id?: string } = { type, name };
+    const bucketName = typeof b.bucketName === 'string' ? b.bucketName.trim() : '';
+    const databaseName = typeof b.databaseName === 'string' ? b.databaseName.trim() : '';
+    const id = typeof b.id === 'string' ? b.id.trim() : '';
+    if (bucketName) out.bucketName = bucketName;
+    if (databaseName) out.databaseName = databaseName;
+    if (id) out.id = id;
+    if (type === 'r2_bucket' && !bucketName) {
+      throw new DeployError('Cloudflare Workers R2 binding "' + name + '" needs a bucketName.', 400, undefined, 'CFW_BINDINGS_INVALID');
+    }
+    if (type === 'd1' && !databaseName && !id) {
+      throw new DeployError('Cloudflare Workers D1 binding "' + name + '" needs a databaseName or id.', 400, undefined, 'CFW_BINDINGS_INVALID');
+    }
+    return out;
+  });
 }
 
 function normalizeCloudflareWorkersAccess(value: unknown): { enabled: boolean; rule?: CloudflareWorkersAccessRule } | undefined {
@@ -362,10 +420,20 @@ export async function writeCloudflareWorkersConfig(input: Partial<DeployConfig>)
     clientId: typeof input?.clientId === 'string' ? input.clientId.trim() : current.clientId,
     redirectUri: typeof input?.redirectUri === 'string' ? input.redirectUri.trim() : current.redirectUri,
     scopes: Array.isArray(input?.scopes) ? input.scopes : current.scopes,
-    bindings: Array.isArray(input?.bindings) ? input.bindings : current.bindings,
-    access: input?.access !== undefined ? input.access : current.access,
-    customDomain: input?.customDomain !== undefined ? input.customDomain : current.customDomain,
+    bindings: input?.bindings !== undefined ? normalizeCloudflareWorkersBindings(input.bindings) : current.bindings,
+    access: input?.access !== undefined ? normalizeCloudflareWorkersAccess(input.access) : current.access,
+    customDomain: input?.customDomain !== undefined ? normalizeCloudflareWorkersCustomDomain(input.customDomain) : current.customDomain,
   };
+  // Persist exactly what the read path will see. The read path applies the same
+  // normalizers, so an un-normalized write that reads back as `undefined` would
+  // silently downgrade "Access on" / "custom domain" to "off" on the next deploy
+  // while the PUT response echoed the intended value.
+  if (input?.access !== undefined && input.access !== null && next.access === undefined) {
+    throw new DeployError('Cloudflare Access is enabled but has no valid rule — add at least one email, a domain, a policy id, or "only me".', 400, undefined, 'CFW_ACCESS_EMPTY_RULE');
+  }
+  if (input?.customDomain !== undefined && input.customDomain !== null && next.customDomain === undefined) {
+    throw new DeployError('Cloudflare Workers custom domain needs both a hostname and a zoneId.', 400, undefined, 'CFW_CUSTOM_DOMAIN_INVALID');
+  }
   // In 'oauth' mode the API token is optional — the deploy uses the rotating
   // OAuth access token instead. Only require a static token in 'token' mode.
   if (next.credentialMode !== 'oauth' && !next.token) {
@@ -387,14 +455,16 @@ export async function writeCloudflareWorkersConfig(input: Partial<DeployConfig>)
  * never strands a working token-mode user. Bypasses the accountId/token
  * validation in writeCloudflareWorkersConfig for the same reason. */
 export async function writeCloudflareOAuthIdentity(input: { clientId: string; redirectUri: string }) {
-  const current = await readCloudflareWorkersConfig();
-  const next: DeployConfig = {
-    ...current,
-    clientId: input.clientId,
-    redirectUri: input.redirectUri,
-  };
-  await writeDeployConfigFile(deployConfigPath(CLOUDFLARE_WORKERS_PROVIDER_ID), next);
-  return publicCloudflareWorkersConfig(next);
+  return withCloudflareConfigMutation(async () => {
+    const current = await readCloudflareWorkersConfig();
+    const next: DeployConfig = {
+      ...current,
+      clientId: input.clientId,
+      redirectUri: input.redirectUri,
+    };
+    await writeDeployConfigFile(deployConfigPath(CLOUDFLARE_WORKERS_PROVIDER_ID), next);
+    return publicCloudflareWorkersConfig(next);
+  });
 }
 
 /** Switch the Workers credential authority to OAuth — invoked only after the
