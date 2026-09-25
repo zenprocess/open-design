@@ -265,8 +265,12 @@ function normalizeCloudflareWorkersAccessRule(rule: unknown): CloudflareWorkersA
 function normalizeCloudflareWorkersAccess(value: unknown): { enabled: boolean; rule?: CloudflareWorkersAccessRule } | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as JsonObject;
+  if (v.enabled !== true) return { enabled: false };
   const rule = normalizeCloudflareWorkersAccessRule(v.rule);
-  return rule === undefined ? { enabled: v.enabled === true } : { enabled: v.enabled === true, rule };
+  // Enabled access must carry a valid rule; a bare `{ enabled: true }` would
+  // otherwise deploy as a public URL while the UI believes it is private.
+  if (rule === undefined) return undefined;
+  return { enabled: true, rule };
 }
 
 function normalizeCloudflareWorkersCustomDomain(value: unknown): { hostname: string; zoneId: string } | undefined {
@@ -368,6 +372,9 @@ export async function writeCloudflareWorkersConfig(input: Partial<DeployConfig>)
     throw new DeployError('Cloudflare API token is required.', 400, undefined, 'CFW_TOKEN_REQUIRED');
   }
   if (!next.accountId) throw new DeployError('Cloudflare account ID is required.', 400, undefined, 'CFW_ACCOUNT_ID_REQUIRED');
+  if (next.access?.enabled && !next.access.rule) {
+    throw new DeployError('Cloudflare Access is enabled but has no rule — add an email, domain, or policy.', 400, undefined, 'CFW_ACCESS_EMPTY_RULE');
+  }
   await writeDeployConfigFile(deployConfigPath(CLOUDFLARE_WORKERS_PROVIDER_ID), next);
   return publicCloudflareWorkersConfig(next);
   });

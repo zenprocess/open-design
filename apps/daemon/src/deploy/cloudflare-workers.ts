@@ -407,19 +407,26 @@ async function ensureCloudflareOtpIdentityProvider(config: WorkersDeployConfig):
 // "access.api.error.conflict: destination belongs to another application".
 // Find the app that already claims this Worker so we can update it in place.
 async function findCloudflareAccessAppByWorker(config: WorkersDeployConfig, workerId: string): Promise<JsonObject | null> {
-  const resp = await fetchWithRetry(
-    CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps',
-    { method: 'GET', headers: cloudflareHeaders(config.token) },
-  );
-  const json = await readCloudflareJson(resp);
-  if (!resp.ok || json.success !== true || !Array.isArray(json.result)) return null;
-  const apps = json.result as JsonObject[];
-  return (
-    apps.find((a) => {
+  const base = CLOUDFLARE_API + '/accounts/' + encodeURIComponent(config.accountId) + '/access/apps';
+  let page = 1;
+  for (;;) {
+    const resp = await fetchWithRetry(
+      base + '?page=' + page + '&per_page=100',
+      { method: 'GET', headers: cloudflareHeaders(config.token) },
+    );
+    const json = await readCloudflareJson(resp);
+    if (!resp.ok || json.success !== true || !Array.isArray(json.result)) return null;
+    const apps = json.result as JsonObject[];
+    const match = apps.find((a) => {
       const dests = Array.isArray(a?.destinations) ? (a.destinations as JsonObject[]) : [];
       return dests.some((d) => d?.type === 'worker' && d?.worker_id === workerId);
-    }) ?? null
-  );
+    });
+    if (match) return match;
+    const info = (json.result_info ?? {}) as JsonObject;
+    const totalPages = typeof info.total_pages === 'number' && info.total_pages > 0 ? info.total_pages : 1;
+    if (page >= totalPages || apps.length === 0) return null;
+    page += 1;
+  }
 }
 
 async function createCloudflareAccessApp(
@@ -448,16 +455,18 @@ async function createCloudflareAccessApp(
   }
   const destinations: JsonObject[] = [{ type: 'worker', worker_id: workerId }];
   if (input.includePreview) destinations.push({ type: 'preview_worker', worker_id: workerId });
-  const otpId = await ensureCloudflareOtpIdentityProvider(config);
   const body: JsonObject = {
     name: input.scriptName + ' (OpenDesign)',
     type: 'self_hosted',
     destinations,
-    allowed_idps: [otpId],
   };
   if (input.rule.kind === 'policy') {
+    // A referenced policy may already carry its own SSO IdPs, so leave
+    // allowed_idps unset (do NOT pin the app to the email one-time PIN).
     body.policies = [{ id: input.rule.policyId, precedence: 1 }];
   } else {
+    const otpId = await ensureCloudflareOtpIdentityProvider(config);
+    body.allowed_idps = [otpId];
     const include = accessRuleInclude(input.rule, selfEmail);
     if (include.length === 0) {
       throw new DeployError('Cloudflare Access rule is empty — add at least one email or a domain.', 400, undefined, 'CFW_ACCESS_EMPTY_RULE');
@@ -589,6 +598,8 @@ export async function deployToCloudflareWorkers(input: {
             // best-effort: a stale Access app may linger; the new app still governs.
           }
         }
+      } else if (priorAccessAppId) {
+        await deleteCloudflareAccessApp(cfg, priorAccessAppId);
       }
       metadata.steps = steps;
       const prefix = versionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'preview';

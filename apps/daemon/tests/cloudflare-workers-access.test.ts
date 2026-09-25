@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkDeploymentUrl, isCloudflareAccessProtectedResponse, readCloudflareWorkersConfig, writeCloudflareWorkersConfig } from '../src/deploy.js';
+import { checkDeploymentUrl, configureCloudflareWorkersDataDir, isCloudflareAccessProtectedResponse, readCloudflareWorkersConfig, writeCloudflareWorkersConfig } from '../src/deploy.js';
 import {
   deployToCloudflareWorkers,
   probeCloudflareWorkersCapabilities,
@@ -71,6 +71,7 @@ describe('cloudflare-workers access config', () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'od-workers-access-'));
     const prior = process.env.OD_USER_STATE_DIR;
     process.env.OD_USER_STATE_DIR = dir;
+    configureCloudflareWorkersDataDir(dir);
     try {
       await writeCloudflareWorkersConfig({
         token: 'tok', accountId: 'acct_test',
