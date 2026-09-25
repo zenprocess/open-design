@@ -298,7 +298,9 @@ describe('deployToCloudflareWorkers deploy log', () => {
       customDomain: { hostname: 'app.example.com', zoneId: 'zone-1' },
     });
     const steps = stepsOf(out);
-    expect(steps.map((s) => s.name)).toEqual(['assets', 'script', 'access-app', 'subdomain', 'custom-domain']);
+    // The Access app is created BEFORE the live script PUT (go-live ordering:
+    // no unprotected window), so it precedes 'script' in the step log.
+    expect(steps.map((s) => s.name)).toEqual(['assets', 'access-app', 'script', 'subdomain', 'custom-domain']);
     expect(steps.find((s) => s.name === 'assets')?.detail).toBe('1');
     expect(steps.find((s) => s.name === 'access-app')?.detail).toBe('app-123');
     expect(steps.find((s) => s.name === 'subdomain')?.detail).toBe('https://my-site.acct-test.workers.dev');

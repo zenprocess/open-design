@@ -624,12 +624,37 @@ export async function deployToCloudflareWorkers(input: {
       };
     }
 
+    // Create/update the Access app BEFORE the live script PUT so there is never
+    // a window where the Worker is live but unprotected. On a first deploy the
+    // Worker has no tag yet (getCloudflareWorkerTag returns ''), so fall back to
+    // post-PUT creation in that case.
+    const metadata: JsonObject = { scriptName };
+    let accessAppCreatedBeforePut = false;
+    if (access?.enabled && access.rule) {
+      const workerId = await getCloudflareWorkerTag(cfg, scriptName);
+      if (workerId) {
+        const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access.rule, includePreview: true });
+        metadata.accessProtected = true;
+        metadata.accessAppId = app.appId;
+        metadata.createdByOpenDesign = true;
+        steps.push({ name: 'access-app', status: 'done', detail: app.appId });
+        accessAppCreatedBeforePut = true;
+        if (priorAccessAppId && priorAccessAppId !== app.appId) {
+          try {
+            await deleteCloudflareAccessApp(cfg, priorAccessAppId);
+          } catch {
+            // best-effort: a stale Access app may linger; the new app still governs.
+          }
+        }
+      }
+    }
+
     await uploadWorkerScript(cfg, scriptName, moduleCode, completionJwt, isCustomModule);
     steps.push({ name: 'script', status: 'done' });
     const subdomain = await readAccountSubdomain(cfg);
     const url = 'https://' + scriptName + '.' + subdomain + '.workers.dev';
-    const metadata: JsonObject = { scriptName };
-    if (access?.enabled && access.rule) {
+    if (access?.enabled && access.rule && !accessAppCreatedBeforePut) {
+      // First deploy: the Worker now exists, so its tag is resolvable.
       const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access.rule, includePreview: true });
       metadata.accessProtected = true;
       metadata.accessAppId = app.appId;
@@ -642,7 +667,7 @@ export async function deployToCloudflareWorkers(input: {
           // best-effort: a stale Access app may linger; the new app still governs.
         }
       }
-    } else if (priorAccessAppId) {
+    } else if (priorAccessAppId && !(access?.enabled && access.rule)) {
       try {
         await deleteCloudflareAccessApp(cfg, priorAccessAppId);
       } catch {
