@@ -14819,7 +14819,10 @@ function HtmlViewer({
             setCloudflareWorkersOAuthBusy('idle');
             setCloudflareWorkersOAuthError(null);
             setCloudflareWorkersOAuthPendingAuthUrl(null);
-            if (status.accountId) setCloudflareAccountId(status.accountId);
+            // Only fill the field when it is still empty: a user who already
+            // typed or picked an account id must not be silently overwritten by a
+            // late poll tick.
+            if (status.accountId) setCloudflareAccountId((prev) => (prev.trim() ? prev : (status.accountId ?? '')));
             stopCloudflareWorkersOAuthPoll();
           } else if (!status.connected) {
             setCloudflareWorkersOAuthStatus(status);
@@ -14930,7 +14933,7 @@ function HtmlViewer({
       const status = await fetchCloudflareAuthStatus();
       if (status) {
         setCloudflareWorkersOAuthStatus(status);
-        if (status.connected && status.accountId) setCloudflareAccountId(status.accountId);
+        if (status.connected && status.accountId) setCloudflareAccountId((prev) => (prev.trim() ? prev : (status.accountId ?? '')));
         if (status.connected) {
           setCloudflareWorkersOAuthPendingAuthUrl(null);
           stopCloudflareWorkersOAuthPoll();

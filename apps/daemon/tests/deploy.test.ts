@@ -2623,7 +2623,7 @@ describe('deployment db: Cloudflare Workers public info', () => {
       expect(publicDeployment(loaded!)).not.toHaveProperty('providerMetadata');
       expect(publicDeployment(loaded!)).toMatchObject({ cloudflareWorkers: lifted });
     } finally {
-      closeDatabase(db);
+      closeDatabase();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -2664,7 +2664,7 @@ describe('deployment db: Cloudflare Workers public info', () => {
       });
       expect(pages?.cloudflareWorkers).toBeUndefined();
     } finally {
-      closeDatabase(db);
+      closeDatabase();
       await rm(root, { recursive: true, force: true });
     }
   });

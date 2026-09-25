@@ -231,11 +231,6 @@ export function registerCloudflareRoutes(
       return res.status(403).json({ error: 'cross-origin request rejected' });
     }
 
-    // Set once this attempt owns the credential mutation. A failure before that
-    // point (e.g. an unreadable config file) belongs to no attempt of ours, so
-    // the catch must not tear down a listener a previous /start installed — its
-    // redirect would then land on a closed port.
-    let attemptMutationEntered = false;
     try {
       const cfg = await readCloudflareWorkersConfig();
       // The Connect UI posts the clientId/redirectUri it just collected; on a
@@ -269,9 +264,7 @@ export function registerCloudflareRoutes(
       let callbackPort = 0;
       // Serialize the FULL attempt transition (stop prior listener, bump
       // generation, evict stale PKCE state, mint new state, install the new
-      // listener) so two overlapping /start calls can never race to bind :56122
-      // and the loser's catch can't stop the winner's listener.
-      attemptMutationEntered = true;
+      // listener) so two overlapping /start calls can never race to bind :56122.
       await runCredentialMutation(async () => {
         await stopActiveListener();
         oauthAttemptGeneration += 1;
@@ -300,11 +293,10 @@ export function registerCloudflareRoutes(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[cloudflare-oauth] start failed:', msg);
-      if (attemptMutationEntered) {
-        await runCredentialMutation(async () => {
-          await stopActiveListener();
-        });
-      }
+      // No cleanup here: stopActiveListener already ran inside the mutation,
+      // and a failed bind never assigns activeListener. A second queued stop
+      // could tear down a newer attempt's listener that a concurrent /start
+      // installed after this mutation rejected.
       res.status(502).json({ error: msg });
     }
   });

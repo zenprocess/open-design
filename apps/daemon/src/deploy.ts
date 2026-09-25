@@ -325,10 +325,11 @@ function normalizeCloudflareWorkersAccess(value: unknown): { enabled: boolean; r
   const v = value as JsonObject;
   if (v.enabled !== true) return { enabled: false };
   const rule = normalizeCloudflareWorkersAccessRule(v.rule);
-  // Enabled access must carry a valid rule; a bare `{ enabled: true }` would
-  // otherwise deploy as a public URL while the UI believes it is private.
-  if (rule === undefined) return undefined;
-  return { enabled: true, rule };
+  // Enabled access with an unrecognised/empty rule must stay ENABLED-but-inert
+  // (rule omitted), never silently flip to "off": the deploy then fails closed
+  // with CFW_ACCESS_EMPTY_RULE instead of going live unprotected while the UI
+  // believes Access is on.
+  return rule === undefined ? { enabled: true } : { enabled: true, rule };
 }
 
 function normalizeCloudflareWorkersCustomDomain(value: unknown): { hostname: string; zoneId: string } | undefined {

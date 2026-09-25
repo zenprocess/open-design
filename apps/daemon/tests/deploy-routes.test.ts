@@ -1599,7 +1599,7 @@ describe('deploy provider routes', () => {
     configureCloudflareWorkersDataDir(stateRoot);
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
-      if (url.startsWith(baseUrl)) return realFetchFor(url)(input, init);
+      if (url.startsWith(baseUrl)) return realFetchFor()(input, init);
       throw new Error(`Unexpected fetch: ${url}`);
     });
     const realFetch = globalThis.fetch;

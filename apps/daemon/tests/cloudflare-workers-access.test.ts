@@ -31,6 +31,9 @@ type AccessOverrides = Record<string, unknown> & { head?: (url: string) => Respo
 
 function accessFetch(overrides: AccessOverrides = {}) {
   const calls: Call[] = [];
+  // Apps created via POST are remembered so a later find-by-tag (the final
+  // reconcile after a custom-domain attach) sees them, as the real API would.
+  const createdApps: Array<Record<string, unknown>> = [];
   const fn = vi.fn(async (url: string, init?: RequestInit) => {
     calls.push([url, init]);
     if ((init?.method || 'GET').toUpperCase() === 'HEAD') {
@@ -72,8 +75,17 @@ function accessFetch(overrides: AccessOverrides = {}) {
     }
     if (url.includes('/access/apps')) {
       const method = (init?.method || 'GET').toUpperCase();
-      if (method === 'POST') return jsonResponse(overrides.accessCreate ?? { success: true, result: { id: 'app-123', uid: 'app-uid-123' } });
-      return jsonResponse(overrides.accessList ?? { success: true, result: [] });
+      if (method === 'POST') {
+        const createBody = JSON.parse(String(init?.body ?? '{}')) as { name?: unknown; destinations?: unknown };
+        const createOverride = overrides.accessCreate as { success?: boolean; result?: Record<string, unknown> } | undefined;
+        const createSucceeded = !createOverride || createOverride.success !== false;
+        const id = createOverride?.result?.id ?? 'app-123';
+        if (createSucceeded) {
+          createdApps.push({ id, name: createBody.name, destinations: createBody.destinations ?? [] });
+        }
+        return jsonResponse(overrides.accessCreate ?? { success: true, result: { id, uid: 'app-uid-123' } });
+      }
+      return jsonResponse(overrides.accessList ?? { success: true, result: createdApps });
     }
     if (url.endsWith('/user')) {
       return jsonResponse(overrides.user ?? { success: true, result: { email: 'me@example.com' } });
@@ -193,8 +205,14 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     const attachPos = calls.findIndex((c) => c[0].includes('/workers/domains') && c[1]?.method === 'PUT');
     expect(createPos).toBeGreaterThanOrEqual(0);
     expect(attachPos).toBeGreaterThan(createPos);
+    // The pre-PUT app must NOT claim the custom hostname before it is attached.
     const createBody = JSON.parse(calls[createPos]![1]?.body as string) as { destinations: unknown[] };
-    expect(createBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
+    expect(createBody.destinations).not.toContainEqual({ type: 'public', uri: 'app.example.com' });
+    // The final reconcile (after the domain attach) claims the now-attached hostname.
+    const finalPutPos = calls.findIndex((c) => c[0].endsWith('/access/apps/app-123') && c[1]?.method === 'PUT');
+    expect(finalPutPos).toBeGreaterThan(attachPos);
+    const finalBody = JSON.parse(calls[finalPutPos]![1]?.body as string) as { destinations: unknown[] };
+    expect(finalBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
     const heads = calls.filter((c) => c[1]?.method === 'HEAD').map((c) => c[0]);
     expect(heads).toContain('https://my-site.acct-test.workers.dev');
     expect(heads).toContain('https://app.example.com');
@@ -229,12 +247,20 @@ describe('deployToCloudflareWorkers access (fail-closed)', () => {
     // Routed hostnames are known before anything is uploaded.
     expect(listPos).toBeGreaterThanOrEqual(0);
     expect(listPos).toBeLessThan(uploadPos);
-    // The Access app covers the configured AND the still-routed hostname
-    // (normalized) before the live PUT; the foreign script's hostname is not ours.
+    // The pre-PUT app covers the still-routed hostname (normalized) but NOT the
+    // configured hostname it cannot yet serve; the foreign script's hostname is
+    // never ours.
     const createBody = JSON.parse(calls[createPos]![1]?.body as string) as { destinations: unknown[] };
-    expect(createBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
     expect(createBody.destinations).toContainEqual({ type: 'public', uri: 'old.example.com' });
+    expect(createBody.destinations).not.toContainEqual({ type: 'public', uri: 'app.example.com' });
     expect(createBody.destinations).not.toContainEqual({ type: 'public', uri: 'other.example.com' });
+    // The final reconcile (after attach + detach) claims the configured hostname
+    // and drops the detached one.
+    const finalPutPos = calls.findIndex((c) => c[0].endsWith('/access/apps/app-123') && c[1]?.method === 'PUT');
+    expect(finalPutPos).toBeGreaterThan(detachPos);
+    const finalBody = JSON.parse(calls[finalPutPos]![1]?.body as string) as { destinations: unknown[] };
+    expect(finalBody.destinations).toContainEqual({ type: 'public', uri: 'app.example.com' });
+    expect(finalBody.destinations).not.toContainEqual({ type: 'public', uri: 'old.example.com' });
     // The dropped hostname is detached only after the app covers it and the
     // configured one is attached; the foreign hostname is never detached.
     expect(detachPos).toBeGreaterThan(createPos);

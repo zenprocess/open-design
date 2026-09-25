@@ -34,6 +34,7 @@ interface FetchOverrides {
   r2Create?: unknown;
   zones?: unknown;
   domains?: unknown;
+  domainsList?: unknown;
   session?: unknown;
   scriptPut?: unknown;
 }

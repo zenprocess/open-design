@@ -883,10 +883,7 @@ export async function deployToCloudflareWorkers(input: {
       // destination, so a preview deploy must keep covering each hostname
       // Cloudflare routes to the script (strict list — see production below).
       const previewPublicHostnames = accessOn
-        ? uniqueHostnames([
-            ...(customDomain ? [customDomain.hostname] : []),
-            ...(await listCloudflareWorkerDomainsForScript(cfg, scriptName)).map((domain) => domain.hostname),
-          ])
+        ? (await listCloudflareWorkerDomainsForScript(cfg, scriptName)).map((domain) => domain.hostname)
         : [];
       const session = await startAssetsUploadSession(cfg, scriptName, manifest);
       const completionJwt = await uploadAssetBuckets(cfg, session.jwt, session.buckets, hashToFile);
@@ -956,10 +953,11 @@ export async function deployToCloudflareWorkers(input: {
     const attachedDomains = await listCloudflareWorkerDomainsForScript(cfg, scriptName);
     const configuredHostname = customDomain ? normalizeHostname(customDomain.hostname) : '';
     const staleDomains = attachedDomains.filter((domain) => domain.hostname !== configuredHostname);
-    const publicHostnames = uniqueHostnames([
-      ...(configuredHostname ? [configuredHostname] : []),
-      ...attachedDomains.map((domain) => domain.hostname),
-    ]);
+    // Pre-PUT the Access app covers the hostnames Cloudflare ALREADY routes to
+    // the script. The configured customDomain is attached only AFTER the live
+    // PUT, so claiming it here would gate a hostname the Worker never routes
+    // when the attach later fails.
+    const prePutPublicHostnames = attachedDomains.map((domain) => domain.hostname);
     const session = await startAssetsUploadSession(cfg, scriptName, manifest);
     const completionJwt = await uploadAssetBuckets(cfg, session.jwt, session.buckets, hashToFile);
     steps.push({ name: 'assets', status: 'done', detail: String(assetFiles.length) });
@@ -972,7 +970,7 @@ export async function deployToCloudflareWorkers(input: {
     let workerId = accessOn || priorAccessAppId ? await getCloudflareWorkerTag(cfg, scriptName) : '';
     let accessAppId = '';
     if (accessOn && workerId) {
-      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, workerId, publicHostnames, selfEmail, priorAccessAppId });
+      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, workerId, publicHostnames: prePutPublicHostnames, selfEmail, priorAccessAppId });
       accessAppId = app.appId;
       metadata.accessProtected = true;
       metadata.accessAppId = app.appId;
@@ -984,7 +982,7 @@ export async function deployToCloudflareWorkers(input: {
     steps.push({ name: 'script', status: 'done' });
     if (accessOn && !accessAppId) {
       // First deploy: the Worker now exists, so its tag is resolvable.
-      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, publicHostnames, selfEmail, priorAccessAppId });
+      const app = await createCloudflareAccessApp(cfg, { scriptName, rule: access!.rule!, includePreview: true, publicHostnames: prePutPublicHostnames, selfEmail, priorAccessAppId });
       accessAppId = app.appId;
       workerId = app.workerId;
       metadata.accessProtected = true;
@@ -1019,6 +1017,26 @@ export async function deployToCloudflareWorkers(input: {
     for (const stale of staleDomains) {
       await detachCloudflareWorkerDomain(cfg, stale.id);
       steps.push({ name: 'custom-domain-detach', status: 'done', detail: stale.hostname });
+    }
+    // Final reconcile: after attach + detach the hostnames Cloudflare routes here
+    // are exactly [configuredHostname] (or none, with no custom domain). The
+    // pre-PUT app covered the pre-attach set, so re-PUT it now to drop any
+    // detached stale hostname and pick up the newly attached configured one.
+    // createCloudflareAccessApp is idempotent (finds by tag and PUTs in place).
+    // Skipped when neither a custom domain was attached nor a stale domain
+    // detached — the pre-PUT app already covers the script exactly, and an extra
+    // PUT would only churn Cloudflare.
+    if (accessOn && accessAppId && (customDomain || staleDomains.length > 0)) {
+      const finalPublicHostnames = configuredHostname ? [configuredHostname] : [];
+      await createCloudflareAccessApp(cfg, {
+        scriptName,
+        rule: access!.rule!,
+        includePreview: true,
+        workerId,
+        publicHostnames: finalPublicHostnames,
+        selfEmail,
+        priorAccessAppId: accessAppId,
+      });
     }
     const publicUrls = [url, ...(customDomain && url !== 'https://' + customDomain.hostname ? ['https://' + customDomain.hostname] : [])];
     if (accessOn) {
