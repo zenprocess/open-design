@@ -154,6 +154,37 @@ export async function fetchCloudflareUserEmail(
   }
 }
 
+/** `GET /accounts` — the accounts the access token is scoped to. */
+export const CLOUDFLARE_ACCOUNTS_ENDPOINT =
+  'https://api.cloudflare.com/client/v4/accounts';
+
+/**
+ * Resolve the account id an access token belongs to. Best-effort: resolves to
+ * '' on any transport/permission/shape failure so a connect that lacks account
+ * access still completes (the user can still enter the account id by hand).
+ */
+export async function fetchCloudflareAccountId(
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  try {
+    const resp = await fetchImpl(CLOUDFLARE_ACCOUNTS_ENDPOINT, {
+      headers: { Authorization: 'Bearer ' + accessToken },
+    });
+    if (!resp.ok) return '';
+    const json = (await resp.json()) as {
+      success?: unknown;
+      result?: { id?: unknown }[] | null;
+    };
+    if (json?.success !== true) return '';
+    const first = Array.isArray(json.result) ? json.result[0] : undefined;
+    const id = first?.id;
+    return typeof id === 'string' ? id.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 /** OIDC scope that asks Cloudflare to issue a refresh_token alongside the
  * access_token. It is NOT a permission scope — requesting it never widens
  * what the token may do, it only changes whether a refresh_token comes back. */

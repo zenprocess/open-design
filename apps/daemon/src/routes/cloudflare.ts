@@ -40,6 +40,7 @@ import {
 import {
   beginCloudflareAuth,
   completeCloudflareAuth,
+  fetchCloudflareAccountId,
   fetchCloudflareUserEmail,
   cloudflareRedirectUri,
   CLOUDFLARE_OAUTH_SCOPES,
@@ -343,6 +344,14 @@ export function registerCloudflareRoutes(
     // connects; the deploy then falls back to a live lookup and fails closed.
     const email = await fetchCloudflareUserEmail(result.access_token, fetchImpl);
     if (email) stored.email = email;
+    // Self-populate the Workers account from the freshly issued token when the
+    // config does not already name one, so a connect fills the Account ID the
+    // capabilities pickers need instead of forcing a manual entry.
+    let discoveredAccountId = '';
+    if (!stored.accountId) {
+      discoveredAccountId = await fetchCloudflareAccountId(result.access_token, fetchImpl);
+      if (discoveredAccountId) stored.accountId = discoveredAccountId;
+    }
     const committed = await runCredentialMutation(async (): Promise<{ ok: boolean }> => {
       if (attemptGeneration !== oauthAttemptGeneration) return { ok: false };
       // The intent is durable BEFORE the credential it describes: from here on
@@ -416,7 +425,10 @@ export function registerCloudflareRoutes(
         return cleared !== null && (cleared.refreshToken || cleared.accessToken) === mintedToken;
       };
       try {
-        await commitCloudflareOAuthMode({ clientId: result.clientId, redirectUri: result.redirectUri }, attemptMarker);
+        await commitCloudflareOAuthMode(
+          { clientId: result.clientId, redirectUri: result.redirectUri, ...(discoveredAccountId ? { accountId: discoveredAccountId } : {}) },
+          attemptMarker,
+        );
         return { ok: true };
       } catch (err) {
         // The token write already landed but the config commit failed. What the

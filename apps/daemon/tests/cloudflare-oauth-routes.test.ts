@@ -334,6 +334,64 @@ describe('cloudflare-oauth routes', () => {
     }
   });
 
+  it('records the connected account id at connect time and reports it on auth/status', async () => {
+    const dataDir = cloudflareOAuthTokensDir();
+    const realFetch = globalThis.fetch;
+    let accountsCalls = 0;
+    vi.stubGlobal('fetch', async (input: unknown, init?: unknown) => {
+      const url = String(input);
+      if (url.includes('oauth2/token')) {
+        return new Response(
+          JSON.stringify({ access_token: 'acc-connect', token_type: 'Bearer', refresh_token: 'ref', expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/client/v4/user')) {
+        return new Response(JSON.stringify({ success: true, result: { email: 'me@example.com' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/client/v4/accounts')) {
+        accountsCalls += 1;
+        // The account lookup must run with the token that just authorized.
+        const auth = ((init as RequestInit | undefined)?.headers as Record<string, string> | undefined)?.Authorization;
+        expect(auth).toBe('Bearer acc-connect');
+        return new Response(
+          JSON.stringify({ success: true, result: [{ id: 'acct-connect', name: 'Test Account' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return realFetch(input as never, init as never);
+    });
+    try {
+      const startResp = await fetch(`${app.baseUrl}/api/cloudflare/oauth/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ clientId: 'client-abc', redirectUri: 'http://127.0.0.1:56122/callback' }),
+      });
+      expect(startResp.status).toBe(200);
+      const { state } = (await startResp.json()) as { state: string };
+      const completeResp = await fetch(`${app.baseUrl}/api/cloudflare/oauth/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state, code: 'AUTHCODE' }),
+      });
+      expect(completeResp.status).toBe(200);
+      expect(accountsCalls).toBe(1);
+      expect(await getCloudflareOAuthToken(dataDir)).toMatchObject({ accessToken: 'acc-connect', accountId: 'acct-connect' });
+      // The discovered account id lands in the config too, so the capabilities
+      // pickers resolve it without a manual entry.
+      expect((await readCloudflareWorkersConfig()).accountId).toBe('acct-connect');
+      const status = (await (await fetch(`${app.baseUrl}/api/cloudflare/auth/status`)).json()) as Record<string, unknown>;
+      expect(status).toMatchObject({ connected: true, accountId: 'acct-connect' });
+    } finally {
+      vi.unstubAllGlobals();
+      await clearCloudflareOAuthToken(dataDir);
+      await rm(deployConfigPath(CLOUDFLARE_WORKERS_PROVIDER_ID), { force: true });
+    }
+  });
+
   it('stamps a conservative expiry when the connect token response carries no usable expires_in', async () => {
     // `expires_in` is unvalidated on the way out of the token endpoint, so a
     // connect can persist a record with no `expiresAt` at all. That record is

@@ -1040,7 +1040,7 @@ export async function clearPendingCloudflareOAuthGrant(): Promise<void> {
  * does the intent this attempt recorded still stand? A commit whose id is gone
  * refuses, and the connect route's rollback owns the failure semantics. */
 export async function commitCloudflareOAuthMode(
-  identity?: { clientId: string; redirectUri: string },
+  identity?: { clientId: string; redirectUri: string; accountId?: string },
   attemptId?: string,
 ): Promise<void> {
   return withCloudflareConfigMutation(async () => {
@@ -1083,6 +1083,7 @@ export async function commitCloudflareOAuthMode(
     if (identity) {
       next.clientId = identity.clientId;
       next.redirectUri = identity.redirectUri;
+      if (identity.accountId && !next.accountId) next.accountId = identity.accountId;
     }
     // The mode this commit lands is what both markers stood in for: the
     // connect is no longer pending (mode oauth is now durable) and any
