@@ -62,7 +62,7 @@ export interface CallbackListener {
 export async function startCallbackListener(
   input: StartCallbackListenerInput,
 ): Promise<CallbackListener> {
-  const host = input.host ?? CLOUDFLARE_CALLBACK_HOST;
+  const host = input.host ?? process.env.CLOUDFLARE_CALLBACK_HOST ?? CLOUDFLARE_CALLBACK_HOST;
   const port = input.port ?? CLOUDFLARE_CALLBACK_PORT;
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
